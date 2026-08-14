@@ -1,0 +1,4 @@
+# Ignore TypeScript source of the API - only the compiled api/index.js is used
+api/index.ts
+api/server.js
+tsconfig.server.json
