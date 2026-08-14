@@ -1,13 +1,11 @@
 import React, { useState } from 'react';
 import { useAuth } from '../lib/auth-context.tsx';
-import { LogIn, UserPlus, AlertCircle, Mail, Lock, User, Eye, EyeOff } from 'lucide-react';
+import { LogIn, AlertCircle, Mail, Lock, Eye, EyeOff } from 'lucide-react';
 import { Navigate } from 'react-router-dom';
 
 export function LoginPage() {
-  const { signIn, signUp, user } = useAuth();
-  const [mode, setMode] = useState<'login' | 'register'>('login');
+  const { signIn, user } = useAuth();
   
-  const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -24,25 +22,16 @@ export function LoginPage() {
     setError(null);
 
     if (!email.trim() || !password) {
-      setError('Por favor, preencha todos os campos obrigatórios.');
-      return;
-    }
-
-    if (mode === 'register' && password.length < 6) {
-      setError('A senha deve conter no mínimo 6 caracteres.');
+      setError('Por favor, preencha todos os campos.');
       return;
     }
 
     try {
       setIsSubmitting(true);
-      if (mode === 'login') {
-        await signIn(email, password);
-      } else {
-        await signUp(name, email, password);
-      }
+      await signIn(email, password);
     } catch (err: any) {
       console.error('Auth error:', err);
-      setError(err.message || 'Ocorreu um erro ao processar sua solicitação.');
+      setError(err.message || 'E-mail ou senha incorretos.');
     } finally {
       setIsSubmitting(false);
     }
@@ -65,31 +54,9 @@ export function LoginPage() {
       <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
         <div className="bg-white py-8 px-4 shadow-sm sm:rounded-2xl sm:px-10 border border-slate-200">
           
-          {/* Tab Selector */}
-          <div className="flex border-b border-slate-200 mb-6">
-            <button
-              type="button"
-              onClick={() => { setMode('login'); setError(null); }}
-              className={`flex-1 pb-3 text-sm font-semibold text-center border-b-2 transition-colors ${
-                mode === 'login'
-                  ? 'border-indigo-600 text-indigo-600'
-                  : 'border-transparent text-slate-400 hover:text-slate-600'
-              }`}
-            >
-              Entrar
-            </button>
-            <button
-              type="button"
-              onClick={() => { setMode('register'); setError(null); }}
-              className={`flex-1 pb-3 text-sm font-semibold text-center border-b-2 transition-colors ${
-                mode === 'register'
-                  ? 'border-indigo-600 text-indigo-600'
-                  : 'border-transparent text-slate-400 hover:text-slate-600'
-              }`}
-            >
-              Criar Conta
-            </button>
-          </div>
+          <h3 className="text-lg font-bold text-slate-900 mb-5 text-center">
+            Acesse sua conta
+          </h3>
 
           {error && (
             <div className="mb-5 bg-red-50 border border-red-200 rounded-xl p-3.5 flex items-start gap-2.5">
@@ -99,27 +66,6 @@ export function LoginPage() {
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
-            {mode === 'register' && (
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">
-                  Nome Completo
-                </label>
-                <div className="relative rounded-xl shadow-sm">
-                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-                    <User className="w-5 h-5" />
-                  </div>
-                  <input
-                    type="text"
-                    required
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="Seu nome ou da empresa"
-                    className="block w-full pl-10 pr-3 py-2.5 border border-slate-300 rounded-xl text-sm placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:border-indigo-600 transition-all"
-                  />
-                </div>
-              </div>
-            )}
-
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">
                 E-mail
@@ -170,17 +116,8 @@ export function LoginPage() {
               disabled={isSubmitting}
               className="w-full mt-2 flex justify-center items-center py-3 px-4 border border-transparent rounded-xl shadow-sm text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-600 transition-all disabled:opacity-70"
             >
-              {mode === 'login' ? (
-                <>
-                  <LogIn className="w-5 h-5 mr-2" />
-                  {isSubmitting ? 'Entrando...' : 'Entrar'}
-                </>
-              ) : (
-                <>
-                  <UserPlus className="w-5 h-5 mr-2" />
-                  {isSubmitting ? 'Criando conta...' : 'Criar Minha Conta'}
-                </>
-              )}
+              <LogIn className="w-5 h-5 mr-2" />
+              {isSubmitting ? 'Entrando...' : 'Entrar'}
             </button>
           </form>
         </div>
