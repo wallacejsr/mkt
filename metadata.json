@@ -1,0 +1,6 @@
+{
+  "name": "B2B Lead Discovery & Analytics",
+  "description": "Plataforma B2B para prospecção, qualificação com IA e inteligência comercial",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
