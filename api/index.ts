@@ -4,31 +4,41 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 
 const app = express();
-app.use(express.json());
 
+// ─── CORS + JSON parsing ───────────────────────────────────────────────────────
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  next();
+});
+app.use(express.json({ limit: '2mb' }));
+
+// ─── Config ───────────────────────────────────────────────────────────────────
 const JWT_SECRET = process.env.JWT_SECRET || 'mkt-agro-bw-secret-key-2026';
-const DATABASE_URL = process.env.DATABASE_URL;
+const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL;
 
 function createPool() {
   if (!DATABASE_URL) {
-    throw new Error('DATABASE_URL environment variable is not set');
+    throw new Error('DATABASE_URL não configurado nas variáveis de ambiente da Vercel.');
   }
   return new Pool({
     connectionString: DATABASE_URL,
     ssl: { rejectUnauthorized: false },
-    max: 3,
-    connectionTimeoutMillis: 10000,
-    idleTimeoutMillis: 10000,
+    max: 2,
+    connectionTimeoutMillis: 8000,
+    idleTimeoutMillis: 5000,
   });
 }
 
-// ─── Health check ─────────────────────────────────────────────────────────────
-app.get('/api/health', (req, res) => {
+// ─── Health ───────────────────────────────────────────────────────────────────
+app.get('/api/health', (_req, res) => {
   res.json({
-    status: 'ok',
+    ok: true,
     time: new Date().toISOString(),
     hasDb: !!DATABASE_URL,
-    hasJwt: !!process.env.JWT_SECRET,
+    dbHost: DATABASE_URL ? new URL(DATABASE_URL).host : 'N/A',
   });
 });
 
@@ -36,14 +46,14 @@ app.get('/api/health', (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   const pool = createPool();
   try {
-    const { email, password } = req.body;
+    const { email, password } = req.body ?? {};
     if (!email || !password) {
       return res.status(400).json({ error: 'E-mail e senha são obrigatórios.' });
     }
 
     const userResult = await pool.query(
       'SELECT * FROM users WHERE email = $1 LIMIT 1',
-      [email.trim().toLowerCase()]
+      [String(email).trim().toLowerCase()]
     );
     const user = userResult.rows[0];
 
@@ -51,14 +61,13 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'E-mail ou senha incorretos.' });
     }
 
-    const isValid = await bcrypt.compare(password, user.password_hash);
+    const isValid = await bcrypt.compare(String(password), user.password_hash);
     if (!isValid) {
       return res.status(401).json({ error: 'E-mail ou senha incorretos.' });
     }
 
-    // Find business
     const memberResult = await pool.query(
-      'SELECT * FROM organization_members WHERE user_id = $1 LIMIT 1',
+      'SELECT organization_id FROM organization_members WHERE user_id = $1 LIMIT 1',
       [user.id]
     );
     let business = null;
@@ -79,10 +88,10 @@ app.post('/api/auth/login', async (req, res) => {
     const { password_hash, ...safeUser } = user;
     return res.json({ token, user: safeUser, business });
   } catch (err: any) {
-    console.error('Login error:', err);
-    return res.status(500).json({ error: err.message || 'Erro interno.' });
+    console.error('[login]', err.message);
+    return res.status(500).json({ error: err.message || 'Erro interno ao fazer login.' });
   } finally {
-    await pool.end().catch(() => {});
+    pool.end().catch(() => {});
   }
 });
 
@@ -90,45 +99,38 @@ app.post('/api/auth/login', async (req, res) => {
 app.post('/api/auth/register', async (req, res) => {
   const pool = createPool();
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password } = req.body ?? {};
     if (!email || !password) {
       return res.status(400).json({ error: 'E-mail e senha são obrigatórios.' });
     }
-    if (password.length < 6) {
+    if (String(password).length < 6) {
       return res.status(400).json({ error: 'A senha deve ter pelo menos 6 caracteres.' });
     }
 
-    const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email.trim().toLowerCase()]);
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const existing = await pool.query('SELECT id FROM users WHERE email = $1', [normalizedEmail]);
     if (existing.rows[0]) {
       return res.status(400).json({ error: 'Já existe um usuário com este e-mail.' });
     }
 
-    const passwordHash = await bcrypt.hash(password, 10);
+    const passwordHash = await bcrypt.hash(String(password), 10);
     const uid = `user_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-    const normalizedEmail = email.trim().toLowerCase();
 
-    // Insert user
     const userResult = await pool.query(
       'INSERT INTO users (uid, email, name, password_hash) VALUES ($1, $2, $3, $4) RETURNING *',
       [uid, normalizedEmail, name || '', passwordHash]
     );
     const newUser = userResult.rows[0];
 
-    // Create org
     const orgName = name ? `Empresa de ${name}` : `Empresa de ${normalizedEmail.split('@')[0]}`;
-    const orgResult = await pool.query(
-      'INSERT INTO organizations (name) VALUES ($1) RETURNING *',
-      [orgName]
-    );
+    const orgResult = await pool.query('INSERT INTO organizations (name) VALUES ($1) RETURNING *', [orgName]);
     const org = orgResult.rows[0];
 
-    // Create membership
     await pool.query(
       'INSERT INTO organization_members (user_id, organization_id, role) VALUES ($1, $2, $3)',
       [newUser.id, org.id, 'owner']
     );
 
-    // Create business
     const bizResult = await pool.query(
       'INSERT INTO businesses (organization_id, name) VALUES ($1, $2) RETURNING *',
       [org.id, 'Negócio Principal']
@@ -144,14 +146,14 @@ app.post('/api/auth/register', async (req, res) => {
     const { password_hash, ...safeUser } = newUser;
     return res.json({ token, user: safeUser, business });
   } catch (err: any) {
-    console.error('Register error:', err);
+    console.error('[register]', err.message);
     return res.status(400).json({ error: err.message || 'Erro ao registrar.' });
   } finally {
-    await pool.end().catch(() => {});
+    pool.end().catch(() => {});
   }
 });
 
-// ─── Me ───────────────────────────────────────────────────────────────────────
+// ─── Auth/me ──────────────────────────────────────────────────────────────────
 app.get('/api/auth/me', async (req, res) => {
   const pool = createPool();
   try {
@@ -160,10 +162,9 @@ app.get('/api/auth/me', async (req, res) => {
       return res.status(401).json({ error: 'Não autenticado.' });
     }
 
-    const token = authHeader.split('Bearer ')[1];
     let decoded: any;
     try {
-      decoded = jwt.verify(token, JWT_SECRET);
+      decoded = jwt.verify(authHeader.split('Bearer ')[1], JWT_SECRET);
     } catch {
       return res.status(401).json({ error: 'Token inválido ou expirado.' });
     }
@@ -173,7 +174,7 @@ app.get('/api/auth/me', async (req, res) => {
     if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
 
     const memberResult = await pool.query(
-      'SELECT * FROM organization_members WHERE user_id = $1 LIMIT 1',
+      'SELECT organization_id FROM organization_members WHERE user_id = $1 LIMIT 1',
       [user.id]
     );
     let business = null;
@@ -188,38 +189,30 @@ app.get('/api/auth/me', async (req, res) => {
     const { password_hash, ...safeUser } = user;
     return res.json({ user: safeUser, business });
   } catch (err: any) {
-    console.error('Auth me error:', err);
+    console.error('[me]', err.message);
     return res.status(500).json({ error: err.message });
   } finally {
-    await pool.end().catch(() => {});
+    pool.end().catch(() => {});
   }
 });
 
-// ─── Sync (legacy compat) ─────────────────────────────────────────────────────
-app.post('/api/auth/sync', async (req, res) => {
-  res.status(200).json({ message: 'sync deprecated' });
-});
+// ─── Sync compat ──────────────────────────────────────────────────────────────
+app.post('/api/auth/sync', (_req, res) => res.json({ ok: true }));
 
-// ─── All other API routes: load full app lazily ───────────────────────────────
-// These are loaded on-demand to keep the cold start fast
+// ─── Catch-all: load full app lazily ─────────────────────────────────────────
 let fullApp: express.Application | null = null;
 
-async function getFullApp() {
-  if (!fullApp) {
-    const { app: serverApp } = await import('../src/server/app');
-    fullApp = serverApp;
-  }
-  return fullApp;
-}
-
 app.use('/api', async (req, res, next) => {
-  try {
-    const server = await getFullApp();
-    server(req as any, res as any, next);
-  } catch (err: any) {
-    console.error('Full app load error:', err);
-    res.status(503).json({ error: 'Serviço temporariamente indisponível.' });
+  if (!fullApp) {
+    try {
+      const mod = await import('../src/server/app');
+      fullApp = mod.app;
+    } catch (err: any) {
+      console.error('[full-app-load]', err.message);
+      return res.status(503).json({ error: 'Serviço temporariamente indisponível.' });
+    }
   }
+  fullApp!(req as any, res as any, next);
 });
 
 export default app;

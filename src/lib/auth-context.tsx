@@ -28,6 +28,39 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const TOKEN_KEY = 'mkt_agro_auth_token';
+const FETCH_TIMEOUT_MS = 20000; // 20 seconds
+
+/** Wraps fetch with a timeout and network error handling */
+async function fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    return res;
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      throw new Error('Tempo limite excedido. O servidor demorou muito para responder. Tente novamente.');
+    }
+    throw new Error('Erro de rede. Verifique sua conexão e tente novamente.');
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/** Parses a response as JSON, handles non-JSON responses gracefully */
+async function parseJsonResponse(res: Response) {
+  const text = await res.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    if (!res.ok) {
+      throw new Error(`Erro do servidor (${res.status}): ${text.substring(0, 200)}`);
+    }
+    return null;
+  }
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -46,7 +79,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       initHeaders.set('Authorization', `Bearer ${currentToken}`);
     }
 
-    const response = await fetch(input, { ...init, headers: initHeaders });
+    const response = await fetchWithTimeout(input.toString(), { ...init, headers: initHeaders });
 
     if (response.status === 401) {
       localStorage.removeItem(TOKEN_KEY);
@@ -60,16 +93,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const loadUserSession = useCallback(async (authToken: string) => {
     try {
-      const res = await fetch('/api/auth/me', {
+      const res = await fetchWithTimeout('/api/auth/me', {
         headers: { Authorization: `Bearer ${authToken}` }
       });
-      const text = await res.text();
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        data = null;
-      }
+      const data = await parseJsonResponse(res);
       if (res.ok && data) {
         setUser(data.user);
         setBusiness(data.business);
@@ -80,7 +107,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setBusiness(null);
       }
     } catch (e) {
-      console.error("Failed to load user session:", e);
+      console.error('Failed to load user session:', e);
+      // Don't log out on network errors — let the user see the app and retry
     }
   }, []);
 
@@ -101,22 +129,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [loadUserSession]);
 
   const signIn = async (email: string, password: string) => {
-    const res = await fetch('/api/auth/login', {
+    const res = await fetchWithTimeout('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password })
     });
-    
-    const text = await res.text();
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      throw new Error(`Erro do servidor (${res.status}): ${text.substring(0, 120) || 'Resposta inválida do backend.'}`);
-    }
+
+    const data = await parseJsonResponse(res);
 
     if (!res.ok) {
-      throw new Error(data.error || 'Falha ao realizar login.');
+      throw new Error(data?.error || `Erro ${res.status}: falha ao realizar login.`);
+    }
+
+    if (!data?.token) {
+      throw new Error('Resposta inválida do servidor. Tente novamente.');
     }
 
     localStorage.setItem(TOKEN_KEY, data.token);
@@ -126,22 +152,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const signUp = async (name: string, email: string, password: string) => {
-    const res = await fetch('/api/auth/register', {
+    const res = await fetchWithTimeout('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, email, password })
     });
 
-    const text = await res.text();
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      throw new Error(`Erro do servidor (${res.status}): ${text.substring(0, 120) || 'Resposta inválida do backend.'}`);
-    }
+    const data = await parseJsonResponse(res);
 
     if (!res.ok) {
-      throw new Error(data.error || 'Falha ao criar conta.');
+      throw new Error(data?.error || `Erro ${res.status}: falha ao criar conta.`);
+    }
+
+    if (!data?.token) {
+      throw new Error('Resposta inválida do servidor. Tente novamente.');
     }
 
     localStorage.setItem(TOKEN_KEY, data.token);
