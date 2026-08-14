@@ -1,3 +1,4 @@
-# Ignore only the helper files not needed for deployment
+# Ignore helper files not needed for deployment
 api/server.js
+api/handler.js
 tsconfig.server.json
