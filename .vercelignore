@@ -1,5 +1,4 @@
-# Exclude helper/temp files from Vercel deployment
+# Exclude only generated/helper files not needed at runtime
 api/server.js
 api/handler.js
 tsconfig.server.json
-src/vercel-handler.ts
