@@ -1,4 +1,4 @@
-import { db } from '../../db/index.ts';
+import { db } from '../../db/index';
 import {
   recommendations,
   leads,
@@ -10,7 +10,7 @@ import {
   businesses,
   aiGenerations,
   prospects
-} from '../../db/schema.ts';
+} from '../../db/schema';
 import { eq, and, ne, inArray } from 'drizzle-orm';
 import crypto from 'crypto';
 import { GoogleGenAI } from '@google/genai';

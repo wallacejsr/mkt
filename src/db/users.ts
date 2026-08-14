@@ -1,5 +1,5 @@
-import { db } from './index.ts';
-import { users, organizations, organizationMembers, businesses } from './schema.ts';
+import { db } from './index';
+import { users, organizations, organizationMembers, businesses } from './schema';
 import { eq } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 

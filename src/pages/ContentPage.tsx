@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useAuth } from '../lib/auth-context.tsx';
+import { useAuth } from '../lib/auth-context';
 import { useNavigate } from 'react-router-dom';
 import { Calendar, List, Plus, Wand2, CalendarDays, Search, Filter } from 'lucide-react';
 

@@ -1,9 +1,9 @@
 import { Router } from 'express';
-import { requireAuth, AuthRequest } from '../../middleware/auth.ts';
-import { db } from '../../db/index.ts';
-import { businesses, products, targetAudiences, marketingProfiles, goals, users, organizationMembers } from '../../db/schema.ts';
+import { requireAuth, AuthRequest } from '../../middleware/auth';
+import { db } from '../../db/index';
+import { businesses, products, targetAudiences, marketingProfiles, goals, users, organizationMembers } from '../../db/schema';
 import { eq } from 'drizzle-orm';
-import { aiService } from '../services/AIService.ts';
+import { aiService } from '../services/AIService';
 
 export const onboardingRouter = Router();
 

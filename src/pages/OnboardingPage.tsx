@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useAuth } from '../lib/auth-context.tsx';
+import { useAuth } from '../lib/auth-context';
 
 export function OnboardingPage() {
   const { business, user, token, refreshBusiness } = useAuth();

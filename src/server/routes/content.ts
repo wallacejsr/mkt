@@ -1,9 +1,9 @@
 import { Router } from 'express';
-import { requireAuth, AuthRequest } from '../../middleware/auth.ts';
-import { db } from '../../db/index.ts';
-import { contentItems, strategies, businesses, products, targetAudiences } from '../../db/schema.ts';
+import { requireAuth, AuthRequest } from '../../middleware/auth';
+import { db } from '../../db/index';
+import { contentItems, strategies, businesses, products, targetAudiences } from '../../db/schema';
 import { eq, and, desc } from 'drizzle-orm';
-import { aiService } from '../services/AIService.ts';
+import { aiService } from '../services/AIService';
 
 export const contentRouter = Router();
 

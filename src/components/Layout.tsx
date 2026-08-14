@@ -12,7 +12,7 @@ import {
   Settings,
   LogOut
 } from 'lucide-react';
-import { useAuth } from '../lib/auth-context.tsx';
+import { useAuth } from '../lib/auth-context';
 
 const navItems = [
   { name: 'Dashboard', path: '/dashboard', icon: LayoutDashboard },

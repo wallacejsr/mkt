@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useAuth } from '../lib/auth-context.tsx';
+import { useAuth } from '../lib/auth-context';
 import { ArrowLeft, Save, Check, Send, Wand2, RefreshCcw, Sparkles } from 'lucide-react';
 
 export function ContentEditorPage() {

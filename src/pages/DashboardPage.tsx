@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useAuth } from '../lib/auth-context.tsx';
+import { useAuth } from '../lib/auth-context';
 import { useNavigate, Link } from 'react-router-dom';
 import {
   AlertCircle,

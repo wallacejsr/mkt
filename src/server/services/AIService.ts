@@ -1,9 +1,9 @@
 import { GoogleGenAI, Type, Schema } from '@google/genai';
-import { db } from '../../db/index.ts';
+import { db } from '../../db/index';
 import { 
   businesses, products, targetAudiences, marketingProfiles, goals,
   strategies, strategyChannels, strategyPlanWeeks, opportunities, aiGenerations
-} from '../../db/schema.ts';
+} from '../../db/schema';
 import { eq } from 'drizzle-orm';
 
 export class AIService {

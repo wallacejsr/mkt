@@ -1,21 +1,21 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
-import { AuthProvider, useAuth } from './lib/auth-context.tsx';
-import { Layout } from './components/Layout.tsx';
-import { LoginPage } from './pages/LoginPage.tsx';
-import { DashboardPage } from './pages/DashboardPage.tsx';
-import { OnboardingPage } from './pages/OnboardingPage.tsx';
-import { StrategyPage } from './pages/StrategyPage.tsx';
-import { ContentPage } from './pages/ContentPage.tsx';
-import { ContentEditorPage } from './pages/ContentEditorPage.tsx';
-import { CampaignsPage } from './pages/CampaignsPage.tsx';
-import { NewCampaignPage } from './pages/NewCampaignPage.tsx';
-import { CampaignDetailsPage } from './pages/CampaignDetailsPage.tsx';
-import { LeadsPage } from './pages/LeadsPage.tsx';
-import { OpportunitiesPage } from './pages/OpportunitiesPage.tsx';
-import { AnalyticsPage } from './pages/AnalyticsPage.tsx';
-import { ProspectingPage } from './pages/ProspectingPage.tsx';
-import { ProspectingDetailsPage } from './pages/ProspectingDetailsPage.tsx';
+import { AuthProvider, useAuth } from './lib/auth-context';
+import { Layout } from './components/Layout';
+import { LoginPage } from './pages/LoginPage';
+import { DashboardPage } from './pages/DashboardPage';
+import { OnboardingPage } from './pages/OnboardingPage';
+import { StrategyPage } from './pages/StrategyPage';
+import { ContentPage } from './pages/ContentPage';
+import { ContentEditorPage } from './pages/ContentEditorPage';
+import { CampaignsPage } from './pages/CampaignsPage';
+import { NewCampaignPage } from './pages/NewCampaignPage';
+import { CampaignDetailsPage } from './pages/CampaignDetailsPage';
+import { LeadsPage } from './pages/LeadsPage';
+import { OpportunitiesPage } from './pages/OpportunitiesPage';
+import { AnalyticsPage } from './pages/AnalyticsPage';
+import { ProspectingPage } from './pages/ProspectingPage';
+import { ProspectingDetailsPage } from './pages/ProspectingDetailsPage';
 
 function ProtectedRoute({ children, requireOnboarding = true }: { children: React.ReactNode, requireOnboarding?: boolean }) {
   const { user, business, loading } = useAuth();

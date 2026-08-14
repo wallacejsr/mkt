@@ -1,5 +1,5 @@
-import { db } from '../../db/index.ts';
-import { leads } from '../../db/schema.ts';
+import { db } from '../../db/index';
+import { leads } from '../../db/schema';
 import { eq, and, ne } from 'drizzle-orm';
 
 export interface LeadRecommendation {

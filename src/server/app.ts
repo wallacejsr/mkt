@@ -3,16 +3,17 @@ import * as dotenv from "dotenv";
 import jwt from 'jsonwebtoken';
 
 dotenv.config();
-import { requireAuth, AuthRequest, JWT_SECRET_KEY } from '../middleware/auth.ts';
-import { registerUserInDB, loginUserInDB, getUserById, getOrCreateUserAndBusiness } from '../db/users.ts';
-import { onboardingRouter } from './routes/onboarding.ts';
-import { strategyRouter } from './routes/strategy.ts';
-import { contentRouter } from './routes/content.ts';
-import { campaignRouter } from './routes/campaigns.ts';
-import { leadsRouter } from './routes/leads.ts';
-import { recommendationsRouter } from './routes/recommendations.ts';
-import { analyticsRouter } from './routes/analytics.ts';
-import { prospectingRouter } from './routes/prospecting.ts';
+
+import { requireAuth, AuthRequest, JWT_SECRET_KEY } from '../middleware/auth';
+import { registerUserInDB, loginUserInDB, getUserById, getOrCreateUserAndBusiness } from '../db/users';
+import { onboardingRouter } from './routes/onboarding';
+import { strategyRouter } from './routes/strategy';
+import { contentRouter } from './routes/content';
+import { campaignRouter } from './routes/campaigns';
+import { leadsRouter } from './routes/leads';
+import { recommendationsRouter } from './routes/recommendations';
+import { analyticsRouter } from './routes/analytics';
+import { prospectingRouter } from './routes/prospecting';
 
 export const app = express();
 
