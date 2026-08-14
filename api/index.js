@@ -725,14 +725,18 @@ var import_genai = require("@google/genai");
 var import_drizzle_orm3 = require("drizzle-orm");
 var AIService = class {
   constructor() {
-    this.ai = new import_genai.GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build"
-        }
-      }
-    });
+    this.ai = null;
+  }
+  getAI() {
+    if (!this.ai) {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) throw new Error("GEMINI_API_KEY n\xE3o configurado.");
+      this.ai = new import_genai.GoogleGenAI({
+        apiKey,
+        httpOptions: { headers: { "User-Agent": "aistudio-build" } }
+      });
+    }
+    return this.ai;
   }
   async generateInitialStrategy(businessId, orgId) {
     try {
@@ -835,7 +839,7 @@ Se houver informa\xE7\xF5es insuficientes em alguma categoria, fa\xE7a infer\xEA
 
 Informa\xE7\xF5es da Empresa:
 ${context}`;
-      const response = await this.ai.models.generateContent({
+      const response = await this.getAI().models.generateContent({
         model: "gemini-3.6-flash",
         contents: prompt,
         config: {
@@ -941,7 +945,7 @@ Regras de Distribui\xE7\xE3o:
 - Utilize exclusivamente as dores, produtos e posicionamento fornecidos. N\xE3o invente benef\xEDcios, pre\xE7os ou promessas que n\xE3o estejam no contexto.
 - Retorne apenas conte\xFAdos com funnel_stage v\xE1lidos: "awareness", "consideration", "conversion", "retention".
 - As datas (scheduled_date) devem estar dentro do per\xEDodo especificado a partir de hoje.`;
-    const response = await this.ai.models.generateContent({
+    const response = await this.getAI().models.generateContent({
       model: "gemini-3.6-flash",
       contents: prompt,
       config: {
@@ -992,7 +996,7 @@ Item de Conte\xFAdo:
 
 Contexto Estrat\xE9gico da Empresa:
 ${JSON.stringify(strategyDetails, null, 2)}`;
-    const response = await this.ai.models.generateContent({
+    const response = await this.getAI().models.generateContent({
       model: "gemini-3.6-flash",
       contents: prompt,
       config: {
@@ -1030,7 +1034,7 @@ ${currentText}
 """
 
 Retorne APENAS o texto modificado, mantendo a coer\xEAncia.`;
-    const response = await this.ai.models.generateContent({
+    const response = await this.getAI().models.generateContent({
       model: "gemini-3.6-flash",
       contents: prompt,
       config: {
@@ -1104,7 +1108,7 @@ Regras de Ouro:
 1. NUNCA invente pre\xE7os, promo\xE7\xF5es ou descontos que n\xE3o estejam no contexto. Se n\xE3o houver, crie a oferta focando na proposta de valor, n\xE3o em promo\xE7\xF5es financeiras.
 2. A campanha deve ser execut\xE1vel, clara e objetiva.
 3. Se um produto espec\xEDfico n\xE3o foi selecionado, crie uma campanha institucional focada na marca.`;
-    const response = await this.ai.models.generateContent({
+    const response = await this.getAI().models.generateContent({
       model: "gemini-3.6-flash",
       contents: prompt,
       config: {
@@ -1206,7 +1210,7 @@ ${JSON.stringify(campaignData, null, 2)}
 Contexto Adicional (P\xFAblico/Empresa):
 ${JSON.stringify(contextData, null, 2)}
 `;
-    const response = await this.ai.models.generateContent({
+    const response = await this.getAI().models.generateContent({
       model: "gemini-3.6-flash",
       contents: prompt,
       config: {

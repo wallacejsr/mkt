@@ -7,17 +7,18 @@ import {
 import { eq } from 'drizzle-orm';
 
 export class AIService {
-  private ai: GoogleGenAI;
+  private ai: GoogleGenAI | null = null;
 
-  constructor() {
-    this.ai = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        }
-      }
-    });
+  private getAI(): GoogleGenAI {
+    if (!this.ai) {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) throw new Error('GEMINI_API_KEY não configurado.');
+      this.ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
+      });
+    }
+    return this.ai;
   }
 
   async generateInitialStrategy(businessId: string, orgId: string) {
@@ -129,7 +130,7 @@ Informações da Empresa:
 ${context}`;
 
       // 3. Call AI
-      const response = await this.ai.models.generateContent({
+      const response = await this.getAI().models.generateContent({
         model: 'gemini-3.6-flash',
         contents: prompt,
         config: {
@@ -248,7 +249,7 @@ Regras de Distribuição:
 - Retorne apenas conteúdos com funnel_stage válidos: "awareness", "consideration", "conversion", "retention".
 - As datas (scheduled_date) devem estar dentro do período especificado a partir de hoje.`;
 
-    const response = await this.ai.models.generateContent({
+    const response = await this.getAI().models.generateContent({
       model: 'gemini-3.6-flash',
       contents: prompt,
       config: {
@@ -305,7 +306,7 @@ Item de Conteúdo:
 Contexto Estratégico da Empresa:
 ${JSON.stringify(strategyDetails, null, 2)}`;
 
-    const response = await this.ai.models.generateContent({
+    const response = await this.getAI().models.generateContent({
       model: 'gemini-3.6-flash',
       contents: prompt,
       config: {
@@ -349,7 +350,7 @@ ${currentText}
 
 Retorne APENAS o texto modificado, mantendo a coerência.`;
 
-    const response = await this.ai.models.generateContent({
+    const response = await this.getAI().models.generateContent({
       model: 'gemini-3.6-flash',
       contents: prompt,
       config: {
@@ -429,7 +430,7 @@ Regras de Ouro:
 2. A campanha deve ser executável, clara e objetiva.
 3. Se um produto específico não foi selecionado, crie uma campanha institucional focada na marca.`;
 
-    const response = await this.ai.models.generateContent({
+    const response = await this.getAI().models.generateContent({
       model: 'gemini-3.6-flash',
       contents: prompt,
       config: {
@@ -539,7 +540,7 @@ Contexto Adicional (Público/Empresa):
 ${JSON.stringify(contextData, null, 2)}
 `;
 
-    const response = await this.ai.models.generateContent({
+    const response = await this.getAI().models.generateContent({
       model: 'gemini-3.6-flash',
       contents: prompt,
       config: {
