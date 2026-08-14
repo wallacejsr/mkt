@@ -1,8 +1,8 @@
 import { Router } from "express";
-import { db } from "../../db/index.ts";
-import { leads, leadActivities, campaigns, contentItems, businesses, users } from "../../db/schema.ts";
+import { db } from "../../db/index";
+import { leads, leadActivities, campaigns, contentItems, businesses, users } from "../../db/schema";
 import { eq, and, gte, lte, sql } from "drizzle-orm";
-import { requireAuth } from "../../middleware/auth.ts";
+import { requireAuth } from "../../middleware/auth";
 import { GoogleGenAI } from "@google/genai";
 
 export const analyticsRouter = Router();

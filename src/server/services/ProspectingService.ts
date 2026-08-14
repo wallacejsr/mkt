@@ -1,4 +1,4 @@
-import { db } from '../../db/index.js';
+import { db } from '../../db/index';
 import { 
   prospectingSearches, 
   prospects, 
@@ -6,13 +6,13 @@ import {
   leads, 
   businesses,
   organizations 
-} from '../../db/schema.js';
+} from '../../db/schema';
 import { eq, and, inArray, desc, ilike, or } from 'drizzle-orm';
-import { getDiscoveryProvider, SearchParams, RawDiscoveredBusiness } from './BusinessDiscoveryProvider.js';
-import { processWebsiteUrl, discoverOfficialWebsite } from './WebsiteDiscoveryService.js';
-import { fetchPageHtml } from './WebsiteFetcher.js';
-import { extractContactsFromHtml, selectPrimaryContacts } from './PublicContactExtractor.js';
-import { qualifyProspect, qualifyProspectsBatch, generateApproach, BusinessProfileContext, QualificationResult } from './ProspectScoringService.js';
+import { getDiscoveryProvider, SearchParams, RawDiscoveredBusiness } from './BusinessDiscoveryProvider';
+import { processWebsiteUrl, discoverOfficialWebsite } from './WebsiteDiscoveryService';
+import { fetchPageHtml } from './WebsiteFetcher';
+import { extractContactsFromHtml, selectPrimaryContacts } from './PublicContactExtractor';
+import { qualifyProspect, qualifyProspectsBatch, generateApproach, BusinessProfileContext, QualificationResult } from './ProspectScoringService';
 
 export interface CreateSearchInput {
   organizationId: string;

@@ -1,9 +1,9 @@
 import { Router } from "express";
-import { db } from "../../db/index.ts";
-import { recommendations, businesses, users } from "../../db/schema.ts";
+import { db } from "../../db/index";
+import { recommendations, businesses, users } from "../../db/schema";
 import { eq, and, desc } from "drizzle-orm";
-import { requireAuth } from "../../middleware/auth.ts";
-import { RecommendationEngine } from "../services/RecommendationEngine.ts";
+import { requireAuth } from "../../middleware/auth";
+import { RecommendationEngine } from "../services/RecommendationEngine";
 
 export const recommendationsRouter = Router();
 

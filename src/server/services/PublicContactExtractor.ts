@@ -5,7 +5,7 @@ import {
   calculateConfidence, 
   sanitizePhone,
   getEmailPriorityRank
-} from './ContactValidator.js';
+} from './ContactValidator';
 
 export interface ExtractedPageContacts {
   contacts: ExtractedContact[];

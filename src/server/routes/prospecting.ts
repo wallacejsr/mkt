@@ -1,16 +1,16 @@
 import { Router } from "express";
-import { db } from "../../db/index.js";
+import { db } from "../../db/index";
 import { 
   prospectingSearches, 
   prospects, 
   prospectContacts, 
   businesses, 
   users 
-} from "../../db/schema.js";
+} from "../../db/schema";
 import { eq, and, ilike, or, desc, inArray, sql } from "drizzle-orm";
-import { requireAuth } from "../../middleware/auth.js";
-import { ProspectingService } from "../services/ProspectingService.js";
-import { qualifyProspect, generateApproach } from "../services/ProspectScoringService.js";
+import { requireAuth } from "../../middleware/auth";
+import { ProspectingService } from "../services/ProspectingService";
+import { qualifyProspect, generateApproach } from "../services/ProspectScoringService";
 
 export const prospectingRouter = Router();
 

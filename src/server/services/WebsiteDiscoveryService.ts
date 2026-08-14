@@ -1,5 +1,5 @@
 import { URL } from 'url';
-import { validateUrlForSSRF, fetchPageHtml } from './WebsiteFetcher.js';
+import { validateUrlForSSRF, fetchPageHtml } from './WebsiteFetcher';
 
 export interface WebsiteDiscoveryResult {
   website?: string;
