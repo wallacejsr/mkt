@@ -63,8 +63,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const res = await fetch('/api/auth/me', {
         headers: { Authorization: `Bearer ${authToken}` }
       });
-      if (res.ok) {
-        const data = await res.json();
+      const text = await res.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = null;
+      }
+      if (res.ok && data) {
         setUser(data.user);
         setBusiness(data.business);
       } else {
@@ -100,7 +106,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password })
     });
-    const data = await res.json();
+    
+    const text = await res.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(`Erro do servidor (${res.status}): ${text.substring(0, 120) || 'Resposta inválida do backend.'}`);
+    }
+
     if (!res.ok) {
       throw new Error(data.error || 'Falha ao realizar login.');
     }
@@ -117,7 +131,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, email, password })
     });
-    const data = await res.json();
+
+    const text = await res.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(`Erro do servidor (${res.status}): ${text.substring(0, 120) || 'Resposta inválida do backend.'}`);
+    }
+
     if (!res.ok) {
       throw new Error(data.error || 'Falha ao criar conta.');
     }

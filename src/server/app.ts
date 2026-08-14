@@ -1,5 +1,8 @@
 import express from "express";
+import * as dotenv from "dotenv";
 import jwt from 'jsonwebtoken';
+
+dotenv.config();
 import { requireAuth, AuthRequest, JWT_SECRET_KEY } from '../middleware/auth.ts';
 import { registerUserInDB, loginUserInDB, getUserById, getOrCreateUserAndBusiness } from '../db/users.ts';
 import { onboardingRouter } from './routes/onboarding.ts';
