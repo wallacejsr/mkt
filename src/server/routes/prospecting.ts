@@ -305,7 +305,7 @@ prospectingRouter.post("/prospects/:id/qualify", requireAuth, ensureBusinessOwne
 prospectingRouter.post("/prospects/:id/generate-approach", requireAuth, ensureBusinessOwnership, async (req: any, res) => {
   try {
     const { id } = req.params;
-    const { offerProduct } = req.body;
+    const options = req.body || {};
 
     const [prospectRecord] = await db.select().from(prospects)
       .where(and(
@@ -331,10 +331,10 @@ prospectingRouter.post("/prospects/:id/generate-approach", requireAuth, ensureBu
         description: prospectRecord.description || undefined,
         website: prospectRecord.website || undefined,
       },
-      offerProduct
+      options
     );
-
-    res.json({ approach });
+    const { source = 'template', ...approachContent } = approach;
+    res.json({ approach: approachContent, source });
   } catch (error: any) {
     console.error("Error generating approach:", error);
     res.status(500).json({ error: "Falha ao gerar proposta de abordagem." });

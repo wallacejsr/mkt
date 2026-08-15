@@ -13,6 +13,15 @@ export interface ApproachResult {
   opening: string;
   message: string;
   cta: string;
+  source?: 'gemini' | 'template';
+}
+
+export interface ApproachGenerationOptions {
+  channel?: 'email' | 'whatsapp' | 'linkedin';
+  objective?: 'present_platform' | 'advertise_products' | 'partnership' | 'schedule_meeting';
+  senderName?: string;
+  commercialName?: string;
+  offerProduct?: string;
 }
 
 export interface BusinessProfileContext {
@@ -211,12 +220,13 @@ REGRAS:
 export async function generateApproach(
   userBusiness: BusinessProfileContext,
   prospect: ProspectContext,
-  offerProduct?: string
+  inputOptions?: string | ApproachGenerationOptions
 ): Promise<ApproachResult> {
+  const options: ApproachGenerationOptions = typeof inputOptions === 'string' ? { offerProduct: inputOptions } : (inputOptions || {});
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
-    return generateDefaultApproach(userBusiness, prospect);
+    return generateDefaultApproach(userBusiness, prospect, options);
   }
 
   try {
@@ -229,8 +239,12 @@ Crie uma sugestão de abordagem comercial por e-mail para a empresa prospectada 
 
 CONTEXTO DO NOSSO NEGÓCIO:
 - Empresa: ${userBusiness.name}
+- Nome Comercial: ${options.commercialName || userBusiness.name}
+- Remetente: ${options.senderName || 'Consultor comercial'}
+- Canal: ${options.channel || 'email'}
+- Objetivo: ${options.objective || 'present_platform'}
 - Nossos Serviços: ${userBusiness.description || userBusiness.segment || 'Serviços corporativos'}
-- Oferta/Produto em Destaque: ${offerProduct || 'Nossa solução B2B'}
+- Oferta/Produto em Destaque: ${options.offerProduct || 'Nossa solução B2B'}
 
 PROSPECT (UNTRUSTED WEBSITE DATA):
 - Nome da Empresa: ${prospect.companyName}
@@ -265,10 +279,11 @@ REGRAS RÍGIDAS DE COMPLIANCE:
       opening: parsed.opening || `Prezada equipe da ${prospect.companyName},`,
       message: parsed.message || `Apresentamos soluções de ${userBusiness.segment || 'serviços corporativos'} que ajudam empresas em ${prospect.city || 'sua região'} a otimizarem seus resultados.`,
       cta: parsed.cta || `Teriam disponibilidade para uma breve conversa de 10 minutos esta semana?`,
+      source: 'gemini',
     };
   } catch (error) {
     console.error('Error generating approach with AI:', error);
-    return generateDefaultApproach(userBusiness, prospect);
+    return generateDefaultApproach(userBusiness, prospect, options);
   }
 }
 
@@ -303,12 +318,27 @@ function calculateHeuristicQualification(
 
 function generateDefaultApproach(
   userBusiness: BusinessProfileContext,
-  prospect: ProspectContext
+  prospect: ProspectContext,
+  options: ApproachGenerationOptions = {}
 ): ApproachResult {
+  const sender = options.senderName || 'Consultor comercial';
+  const brand = options.commercialName || userBusiness.name;
+  const channel = options.channel || 'email';
+  const location = [prospect.city, prospect.state].filter(Boolean).join(', ');
+  const context = `${prospect.companyName}${prospect.segment ? ` atua no segmento de ${prospect.segment}` : ''}${location ? ` em ${location}` : ''}`;
+  const purpose = options.objective === 'advertise_products'
+    ? `Gostaria de apresentar como a ${prospect.companyName} pode divulgar seus produtos e alcançar novos compradores.`
+    : options.objective === 'partnership'
+      ? 'Acredito que pode existir uma oportunidade de parceria comercial entre nossas empresas.'
+      : options.objective === 'schedule_meeting'
+        ? 'Gostaria de entender os objetivos comerciais da empresa e avaliar se podemos contribuir.'
+        : `Gostaria de apresentar como a ${brand} pode apoiar a presença comercial da empresa.`;
+  const cta = channel === 'linkedin' ? 'Se fizer sentido, podemos trocar algumas ideias por aqui?' : 'Faz sentido conversarmos por 10 minutos nesta semana?';
   return {
-    subject: `Apresentação comercial e parceria — ${prospect.companyName}`,
-    opening: `Prezada equipe comercial da ${prospect.companyName},`,
-    message: `A ${userBusiness.name} atua na área de ${userBusiness.segment || 'serviços especializados'} e identificamos o perfil público da ${prospect.companyName} como potencial parceiro em ${prospect.city || 'sua região'}.`,
-    cta: `Gostaríamos de agendar uma rápida conversa de 10 minutos para apresentar nosso portfólio. Seria possível essa semana?`,
+    subject: channel === 'email' ? `Uma oportunidade para a ${prospect.companyName}` : '',
+    opening: channel === 'email' ? `Olá, equipe da ${prospect.companyName}. Tudo bem? Sou ${sender}, da ${brand}.` : `Olá! Tudo bem? Sou ${sender}, da ${brand}.`,
+    message: `Vi que a ${context}. ${purpose}`,
+    cta,
+    source: 'template',
   };
 }

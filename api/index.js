@@ -1123,17 +1123,53 @@ function digitsOnly(value, maxLength = 20) {
   return valueDigits && !/^0+$/.test(valueDigits) ? valueDigits.slice(0, maxLength) : null;
 }
 
-function defaultProspectApproach(business, prospect, offerProduct) {
-  const ourSolution = cleanSpreadsheetValue(offerProduct, 200)
-    || cleanSpreadsheetValue(business.description, 240)
-    || cleanSpreadsheetValue(business.segment, 120)
-    || 'soluções de marketing e desenvolvimento comercial';
+function defaultProspectApproach(business, prospect, options = {}) {
+  const senderName = cleanSpreadsheetValue(options.senderName, 100) || 'um consultor comercial';
+  const commercialName = cleanSpreadsheetValue(options.commercialName, 140) || cleanSpreadsheetValue(business.name, 140) || 'nossa empresa';
+  const channel = ['email', 'whatsapp', 'linkedin'].includes(options.channel) ? options.channel : 'email';
+  const objective = ['present_platform', 'advertise_products', 'partnership', 'schedule_meeting'].includes(options.objective) ? options.objective : 'present_platform';
+  const offerProduct = cleanSpreadsheetValue(options.offerProduct, 220);
   const location = [prospect.city, prospect.state].filter(Boolean).join(', ');
+  const prospectContext = `${prospect.company_name}${prospect.segment ? ` atua no segmento de ${prospect.segment}` : ''}${location ? ` em ${location}` : ''}`;
+  const isAgro = /agro|rural|pecu|revenda/i.test([commercialName, business.segment, business.description, prospect.segment].filter(Boolean).join(' '));
+  const valueProposition = offerProduct
+    ? `podemos apoiar sua empresa com ${offerProduct}`
+    : isAgro
+      ? 'conectamos empresas do agronegócio a produtores e compradores rurais, ampliando a visibilidade de produtos e ofertas'
+      : `ajudamos empresas a ampliar sua presença comercial com ${business.segment || 'soluções especializadas'}`;
+  const objectiveSentence = {
+    present_platform: `Gostaria de apresentar como ${valueProposition}.`,
+    advertise_products: `Gostaria de mostrar como a ${prospect.company_name} pode divulgar seus produtos e ofertas para novos compradores.`,
+    partnership: `Acredito que pode existir uma oportunidade de parceria comercial entre nossas empresas.`,
+    schedule_meeting: `Gostaria de entender os objetivos comerciais da empresa e avaliar se podemos contribuir.`,
+  }[objective];
+  const cta = channel === 'whatsapp'
+    ? 'Faz sentido conversarmos por alguns minutos nesta semana?'
+    : channel === 'linkedin'
+      ? 'Se fizer sentido, podemos trocar algumas ideias por aqui?'
+      : 'Você teria disponibilidade para uma conversa breve, de 10 minutos, nesta semana?';
+
+  if (channel === 'whatsapp') {
+    return {
+      subject: '',
+      opening: `Olá! Tudo bem? Sou ${senderName}, da ${commercialName}.`,
+      message: `Vi que a ${prospectContext}. ${objectiveSentence}`,
+      cta,
+    };
+  }
+  if (channel === 'linkedin') {
+    return {
+      subject: '',
+      opening: `Olá! Sou ${senderName}, da ${commercialName}.`,
+      message: `Conheci o perfil da ${prospect.company_name}${prospect.segment ? ` no segmento de ${prospect.segment}` : ''}. ${objectiveSentence}`,
+      cta,
+    };
+  }
   return {
-    subject: `Possível parceria com a ${prospect.company_name}`,
-    opening: `Olá, equipe da ${prospect.company_name}. Tudo bem?`,
-    message: `Meu nome é da equipe da ${business.name}. Trabalhamos com ${ourSolution} e identificamos que a ${prospect.company_name}${prospect.segment ? ` atua no segmento de ${prospect.segment}` : ''}${location ? ` em ${location}` : ''}. Gostaria de entender se existe espaço para conversarmos sobre oportunidades que façam sentido para o momento da empresa.`,
-    cta: 'Podemos agendar uma conversa breve, de 10 minutos, nos próximos dias?',
+    subject: objective === 'advertise_products' ? `Mais visibilidade para os produtos da ${prospect.company_name}` : `Uma oportunidade para a ${prospect.company_name}`,
+    opening: `Olá, equipe da ${prospect.company_name}. Tudo bem? Sou ${senderName}, da ${commercialName}.`,
+    message: `Identifiquei que a ${prospectContext}. ${objectiveSentence}`,
+    cta,
   };
 }
 
@@ -1488,21 +1524,30 @@ app.post('/api/prospecting/prospects/:id/generate-approach', async (req, res) =>
     )).rows[0];
     if (!prospect) return res.status(404).json({ error: 'Prospect não encontrado.' });
 
-    const fallback = defaultProspectApproach(authorized.business, prospect, req.body?.offerProduct);
+    const fallback = defaultProspectApproach(authorized.business, prospect, req.body || {});
     let approach = fallback;
     let source = 'template';
     if (process.env.GEMINI_API_KEY) {
       try {
         const { GoogleGenAI } = await import('@google/genai');
         const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        const prompt = `Crie uma abordagem comercial B2B curta, ética e personalizada em português do Brasil.
+        const channel = ['email', 'whatsapp', 'linkedin'].includes(req.body?.channel) ? req.body.channel : 'email';
+        const objectiveLabels = {
+          present_platform: 'apresentar a plataforma', advertise_products: 'convidar a empresa para anunciar produtos',
+          partnership: 'propor uma parceria', schedule_meeting: 'agendar uma conversa',
+        };
+        const prompt = `Crie uma abordagem comercial B2B curta, ética e personalizada em português do Brasil para ${channel}.
 Não invente relacionamento anterior, resultados ou fatos. Não envie nada; produza apenas uma minuta.
+Evite frases artificiais, repetição do nome das empresas e cópia literal da descrição do negócio.
+Para WhatsApp use no máximo 550 caracteres. Para LinkedIn use no máximo 700. Para e-mail use no máximo 1200.
 
 NOSSA EMPRESA:
-- Nome: ${authorized.business.name}
+- Nome comercial: ${cleanSpreadsheetValue(req.body?.commercialName, 140) || authorized.business.name}
+- Remetente: ${cleanSpreadsheetValue(req.body?.senderName, 100) || 'consultor comercial'}
 - Segmento: ${authorized.business.segment || 'não informado'}
 - Descrição: ${authorized.business.description || 'não informada'}
 - Oferta: ${cleanSpreadsheetValue(req.body?.offerProduct, 200) || 'solução principal da empresa'}
+- Objetivo: ${objectiveLabels[req.body?.objective] || objectiveLabels.present_platform}
 
 PROSPECT:
 - Empresa: ${prospect.company_name}

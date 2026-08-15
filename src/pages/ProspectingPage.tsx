@@ -66,7 +66,10 @@ export function ProspectingPage() {
     isOpen: boolean;
     companyName: string;
     approach: any;
-  }>({ isOpen: false, companyName: '', approach: null });
+    source: string;
+    channel: string;
+    onRegenerate?: () => Promise<void>;
+  }>({ isOpen: false, companyName: '', approach: null, source: 'template', channel: 'email' });
 
   // Filters state
   const [filterEmail, setFilterEmail] = useState(false);
@@ -672,8 +675,8 @@ export function ProspectingPage() {
         onClose={() => setSelectedProspectId(null)}
         onImportToCRM={handleImportSingle}
         onRefreshProspects={fetchData}
-        onOpenApproach={(companyName, approach) => {
-          setApproachModalState({ isOpen: true, companyName, approach });
+        onOpenApproach={(companyName, approach, meta, onRegenerate) => {
+          setApproachModalState({ isOpen: true, companyName, approach, source: meta.source, channel: meta.channel, onRegenerate });
         }}
       />
 
@@ -683,6 +686,9 @@ export function ProspectingPage() {
         onClose={() => setApproachModalState({ ...approachModalState, isOpen: false })}
         companyName={approachModalState.companyName}
         approach={approachModalState.approach}
+        source={approachModalState.source}
+        channel={approachModalState.channel}
+        onRegenerate={approachModalState.onRegenerate}
       />
     </div>
   );
