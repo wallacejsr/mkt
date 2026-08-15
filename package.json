@@ -7,7 +7,7 @@
     "dev": "npx tsx server.ts",
     "build": "npx vite build && npx esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "build:frontend": "npx vite build",
-    "build:vercel": "npx vite build && npx esbuild src/vercel-handler.ts --bundle --platform=node --format=cjs --packages=external --footer:js=\"module.exports = vercel_handler_default;\" --outfile=api/index.js",
+    "build:vercel": "npx vite build",
     "start": "node dist/server.cjs",
     "preview": "npx vite preview",
     "clean": "rm -rf dist server.js",
