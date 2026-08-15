@@ -14,6 +14,7 @@ import { leadsRouter } from './routes/leads';
 import { recommendationsRouter } from './routes/recommendations';
 import { analyticsRouter } from './routes/analytics';
 import { prospectingRouter } from './routes/prospecting';
+import { assistantRouter } from './routes/assistant';
 
 export const app = express();
 
@@ -100,6 +101,7 @@ app.use('/api/leads', leadsRouter);
 app.use('/api/recommendations', recommendationsRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/prospecting', prospectingRouter);
+app.use('/api/assistant', assistantRouter);
 
 // Catch-all for API routes so Vite/SPA doesn't return HTML on non-existent endpoints
 app.use('/api', (req, res) => {

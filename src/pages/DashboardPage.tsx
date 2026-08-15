@@ -98,7 +98,7 @@ export function DashboardPage() {
   };
 
   const getUserFirstName = () => {
-    if (user?.displayName) return user.displayName.split(' ')[0];
+    if (user?.name) return user.name.split(' ')[0];
     if (user?.email) return user.email.split('@')[0];
     return 'Usuário';
   };

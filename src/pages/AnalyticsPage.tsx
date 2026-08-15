@@ -41,6 +41,7 @@ export function AnalyticsPage() {
   const [comparePrevious, setComparePrevious] = useState(true);
   const [aiInsights, setAiInsights] = useState<any[]>([]);
   const [insightsLoading, setInsightsLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
     if (business && token) {
@@ -50,6 +51,7 @@ export function AnalyticsPage() {
 
   const loadAnalytics = async () => {
     setLoading(true);
+    setLoadError('');
     try {
       const queryParams = new URLSearchParams({
         businessId: business?.id || '',
@@ -69,9 +71,15 @@ export function AnalyticsPage() {
       if (res.ok) {
         const json = await res.json();
         setData(json);
+      } else {
+        const error = await res.json().catch(() => null);
+        setData(null);
+        setLoadError(error?.error || `Não foi possível carregar o Analytics (${res.status}).`);
       }
     } catch (e) {
       console.error("Failed to load analytics:", e);
+      setData(null);
+      setLoadError('Não foi possível conectar ao servidor de Analytics.');
     } finally {
       setLoading(false);
     }
@@ -79,8 +87,20 @@ export function AnalyticsPage() {
 
   const handleExportCsv = () => {
     if (!token || !business) return;
-    const url = `/api/analytics/export?businessId=${business.id}&period=${period}`;
-    window.open(url, '_blank');
+    fetch(`/api/analytics/export?businessId=${business.id}&period=${period}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+      .then(async response => {
+        if (!response.ok) throw new Error('Falha ao exportar o relatório.');
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `analytics_${period}.csv`;
+        link.click();
+        URL.revokeObjectURL(url);
+      })
+      .catch(error => setLoadError(error.message));
   };
 
   const loadAiInsights = async () => {
@@ -123,6 +143,19 @@ export function AnalyticsPage() {
       <div className="p-12 text-center text-slate-500">
         <RefreshCw className="w-8 h-8 animate-spin mx-auto mb-3 text-indigo-600" />
         <p className="text-sm font-medium">Carregando inteligência e métricas agregadas...</p>
+      </div>
+    );
+  }
+
+  if (loadError && !data) {
+    return (
+      <div className="p-12 max-w-xl mx-auto text-center">
+        <AlertTriangle className="w-10 h-10 mx-auto mb-3 text-amber-500" />
+        <h1 className="text-lg font-bold text-slate-900">Analytics indisponível</h1>
+        <p className="text-sm text-slate-500 mt-2">{loadError}</p>
+        <button onClick={loadAnalytics} className="mt-5 px-4 py-2 bg-indigo-600 text-white text-sm font-semibold rounded-xl">
+          Tentar novamente
+        </button>
       </div>
     );
   }
@@ -348,7 +381,7 @@ export function AnalyticsPage() {
               <h2 className="text-base font-bold text-slate-900">Funil de Vendas</h2>
               <p className="text-xs text-slate-500">Distribuição atual de leads por estágio no pipeline</p>
             </div>
-            {pipeline?.avgConversionTimeDays !== null && (
+            {pipeline?.avgConversionTimeDays != null && (
               <div className="flex items-center gap-1.5 bg-indigo-50 px-3 py-1.5 rounded-xl border border-indigo-100 text-xs text-indigo-700 font-semibold">
                 <Clock className="w-3.5 h-3.5" />
                 Tempo médio até venda: {pipeline.avgConversionTimeDays.toFixed(1)} dias

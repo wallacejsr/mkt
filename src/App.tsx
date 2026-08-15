@@ -16,6 +16,7 @@ import { OpportunitiesPage } from './pages/OpportunitiesPage';
 import { AnalyticsPage } from './pages/AnalyticsPage';
 import { ProspectingPage } from './pages/ProspectingPage';
 import { ProspectingDetailsPage } from './pages/ProspectingDetailsPage';
+import { AssistantPage } from './pages/AssistantPage';
 
 function ProtectedRoute({ children, requireOnboarding = true }: { children: React.ReactNode, requireOnboarding?: boolean }) {
   const { user, business, loading } = useAuth();
@@ -63,6 +64,7 @@ export default function App() {
             <Route path="prospecting/:searchId" element={<ProspectingDetailsPage />} />
             <Route path="opportunities" element={<OpportunitiesPage />} />
             <Route path="analytics" element={<AnalyticsPage />} />
+            <Route path="assistant" element={<AssistantPage />} />
             {/* Outras rotas serao adicionadas nas proximas fases */}
           </Route>
         </Routes>

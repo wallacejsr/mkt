@@ -28,7 +28,10 @@ const navItems = [
 
 export function Layout() {
   const { pathname } = useLocation();
-  const { signOut, user } = useAuth();
+  const { signOut, user, business } = useAuth();
+
+  const userName = user?.name?.trim() || user?.email?.split('@')[0] || 'Usuário';
+  const businessName = business?.name?.trim() || 'Empresa não identificada';
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900 flex">
@@ -69,14 +72,14 @@ export function Layout() {
         <div className="flex-shrink-0 flex border-t border-slate-200 p-4">
           <div className="flex items-center gap-3 p-2 w-full hover:bg-slate-50 rounded-lg cursor-pointer">
             <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center text-slate-500 font-bold">
-              {user?.displayName?.charAt(0) || 'U'}
+              {userName.charAt(0).toUpperCase()}
             </div>
             <div className="flex-1 overflow-hidden flex justify-between items-center">
               <div>
                 <p className="text-sm font-semibold truncate">
-                  {user?.displayName || 'Usuário'}
+                  {userName}
                 </p>
-                <p className="text-xs text-slate-500 truncate">Sua Empresa</p>
+                <p className="text-xs text-slate-500 truncate" title={businessName}>{businessName}</p>
               </div>
               <button onClick={signOut} className="text-slate-400 hover:text-slate-600" title="Sair">
                 <LogOut className="h-5 w-5" />

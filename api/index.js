@@ -278,7 +278,373 @@ app.get('/api/recommendations', async (req, res) => {
   finally { pool.end().catch(() => {}); }
 });
 
+// ─── Marketing Assistant ─────────────────────────────────────────────────────
+app.post('/api/assistant/chat', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+
+    const message = String(req.body?.message || '').trim();
+    if (!message) return res.status(400).json({ error: 'Digite uma mensagem para o assistente.' });
+    if (message.length > 2000) return res.status(400).json({ error: 'A mensagem deve ter no máximo 2.000 caracteres.' });
+
+    const businessId = authorized.business.id;
+    const [businessResult, productsResult, audienceResult, goalsResult, campaignsResult, leadStatsResult] = await Promise.all([
+      pool.query('SELECT name, segment, description, city, state, service_area, service_type FROM businesses WHERE id=$1', [businessId]),
+      pool.query('SELECT name, type, description, main_benefit, ideal_customer FROM products WHERE business_id=$1 ORDER BY created_at DESC LIMIT 10', [businessId]),
+      pool.query('SELECT description, profile, pains, desires, objections FROM target_audiences WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [businessId]),
+      pool.query('SELECT goal_type, target_metric, timeframe FROM goals WHERE business_id=$1 ORDER BY created_at DESC LIMIT 5', [businessId]),
+      pool.query('SELECT name, objective, status, budget, leads, sales FROM campaigns WHERE business_id=$1 ORDER BY created_at DESC LIMIT 10', [businessId]),
+      pool.query(
+        `SELECT COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE status='new')::int AS new_count,
+                COUNT(*) FILTER (WHERE status='proposal')::int AS proposals,
+                COUNT(*) FILTER (WHERE status='customer')::int AS customers,
+                COUNT(*) FILTER (WHERE status='lost')::int AS lost
+         FROM leads WHERE business_id=$1`,
+        [businessId]
+      ),
+    ]);
+
+    const context = {
+      business: businessResult.rows[0],
+      products: productsResult.rows,
+      audience: audienceResult.rows[0] || null,
+      goals: goalsResult.rows,
+      campaigns: campaignsResult.rows,
+      pipeline: leadStatsResult.rows[0],
+    };
+
+    const rawHistory = Array.isArray(req.body?.history) ? req.body.history.slice(-8) : [];
+    const history = rawHistory
+      .filter(item => item && ['user', 'assistant'].includes(item.role) && typeof item.content === 'string')
+      .map(item => ({ role: item.role, content: item.content.slice(0, 2000) }));
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      const stats = context.pipeline || {};
+      const answer = Number(stats.total || 0) === 0
+        ? `Ainda não há leads cadastrados para ${context.business?.name || 'a empresa'}. Minha recomendação é começar definindo um perfil de cliente ideal e cadastrar os primeiros contatos no CRM. Depois disso, poderei analisar conversão, propostas e prioridades com mais precisão.`
+        : `O funil atual possui ${stats.total || 0} leads, ${stats.proposals || 0} propostas e ${stats.customers || 0} clientes. Como ação imediata, revise as propostas abertas, registre o próximo contato de cada lead e concentre os esforços nos contatos com maior potencial de fechamento.`;
+      return res.json({ answer, source: 'business-data' });
+    }
+
+    const { GoogleGenAI } = await import('@google/genai');
+    const ai = new GoogleGenAI({ apiKey });
+    const prompt = `Você é o Assistente de Marketing e Vendas do Marketing OS.
+Responda em português do Brasil, de forma prática, clara e direta.
+Use os dados da empresa abaixo como fonte principal. Não invente números, resultados ou fatos ausentes.
+Quando faltarem dados, diga isso claramente e sugira o próximo passo.
+Você pode ajudar com estratégia, conteúdo, campanhas, prospecção, CRM e análise do funil.
+Não afirme que executou, publicou, enviou ou alterou algo; você apenas orienta.
+
+DADOS DA EMPRESA:
+${JSON.stringify(context, null, 2)}
+
+HISTÓRICO RECENTE:
+${history.map(item => `${item.role === 'user' ? 'Usuário' : 'Assistente'}: ${item.content}`).join('\n') || 'Sem histórico anterior.'}
+
+PERGUNTA ATUAL:
+${message}
+
+Forneça uma resposta útil e, quando fizer sentido, finalize com até 3 próximos passos objetivos.`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+      config: { temperature: 0.5, maxOutputTokens: 1200 },
+    });
+    const answer = String(response.text || '').trim();
+    if (!answer) throw new Error('O assistente não retornou uma resposta.');
+    res.json({ answer, source: 'gemini' });
+  } catch (e) {
+    console.error('[assistant-chat]', e.message);
+    res.status(500).json({ error: 'Não foi possível gerar a resposta agora. Tente novamente.' });
+  } finally { pool.end().catch(() => {}); }
+});
+
 // ─── Analytics ────────────────────────────────────────────────────────────────
+function analyticsPeriod(period, customStart, customEnd) {
+  const now = new Date();
+  let end = new Date(now);
+  let start = new Date(now);
+
+  if (period === '7d') start.setDate(now.getDate() - 7);
+  else if (period === '90d') start.setDate(now.getDate() - 90);
+  else if (period === 'this_month') start = new Date(now.getFullYear(), now.getMonth(), 1);
+  else if (period === 'last_month') {
+    start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    end = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
+  } else if (period === 'custom' && customStart && customEnd) {
+    start = new Date(customStart + 'T00:00:00');
+    end = new Date(customEnd + 'T23:59:59.999');
+  } else start.setDate(now.getDate() - 30);
+
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) {
+    throw new Error('Período de Analytics inválido.');
+  }
+
+  // Prevent oversized custom reports from exhausting a serverless invocation.
+  const maxRangeMs = 366 * 24 * 60 * 60 * 1000;
+  if (end.getTime() - start.getTime() > maxRangeMs) {
+    throw new Error('O período máximo permitido é de 366 dias.');
+  }
+
+  const duration = end.getTime() - start.getTime();
+  const previousEnd = new Date(start.getTime() - 1);
+  const previousStart = new Date(previousEnd.getTime() - duration);
+  return { start, end, previousStart, previousEnd };
+}
+
+async function getAuthorizedBusiness(pool, req) {
+  const decoded = verifyToken(req);
+  if (!decoded) return { error: 401, message: 'Não autenticado.' };
+  const member = (await pool.query(
+    'SELECT organization_id FROM organization_members WHERE user_id=$1 LIMIT 1',
+    [decoded.userId]
+  )).rows[0];
+  if (!member) return { error: 404, message: 'Organização não encontrada.' };
+  const business = (await pool.query(
+    'SELECT id FROM businesses WHERE organization_id=$1 LIMIT 1',
+    [member.organization_id]
+  )).rows[0];
+  if (!business) return { error: 404, message: 'Empresa não encontrada.' };
+  if (req.query.businessId && req.query.businessId !== business.id) {
+    return { error: 403, message: 'Acesso negado a esta empresa.' };
+  }
+  return { business };
+}
+
+app.get('/api/analytics/overview', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+
+    const businessId = authorized.business.id;
+    const period = String(req.query.period || '30d');
+    const comparePrevious = String(req.query.comparePrevious || 'true') === 'true';
+    const { start, end, previousStart, previousEnd } = analyticsPeriod(
+      period,
+      req.query.customStart,
+      req.query.customEnd
+    );
+
+    const [allLeadsResult, currentLeadsResult, convertedResult, campaignsResult, contentResult] = await Promise.all([
+      pool.query('SELECT * FROM leads WHERE business_id=$1', [businessId]),
+      pool.query('SELECT * FROM leads WHERE business_id=$1 AND created_at BETWEEN $2 AND $3', [businessId, start, end]),
+      pool.query("SELECT * FROM leads WHERE business_id=$1 AND status='customer' AND converted_at BETWEEN $2 AND $3", [businessId, start, end]),
+      pool.query('SELECT * FROM campaigns WHERE business_id=$1', [businessId]),
+      pool.query('SELECT * FROM content_items WHERE business_id=$1', [businessId]),
+    ]);
+
+    const allLeads = allLeadsResult.rows;
+    const currentLeads = currentLeadsResult.rows;
+    const converted = convertedResult.rows;
+    const businessCampaigns = campaignsResult.rows;
+    const content = contentResult.rows;
+
+    let previousLeads = [];
+    let previousConverted = [];
+    if (comparePrevious) {
+      const previous = await Promise.all([
+        pool.query('SELECT * FROM leads WHERE business_id=$1 AND created_at BETWEEN $2 AND $3', [businessId, previousStart, previousEnd]),
+        pool.query("SELECT * FROM leads WHERE business_id=$1 AND status='customer' AND converted_at BETWEEN $2 AND $3", [businessId, previousStart, previousEnd]),
+      ]);
+      previousLeads = previous[0].rows;
+      previousConverted = previous[1].rows;
+    }
+
+    const numeric = value => Number(value || 0);
+    const parseInvestment = campaign => {
+      if (numeric(campaign.investment_spent) > 0) return numeric(campaign.investment_spent);
+      const normalized = String(campaign.budget || '').replace(/[^0-9,.-]/g, '').replace(',', '.');
+      return Number.parseFloat(normalized) || 0;
+    };
+    const revenueOf = list => list.reduce((sum, lead) => sum + numeric(lead.actual_value), 0);
+    const change = (current, previous) => previous === 0 ? null : ((current - previous) / previous) * 100;
+
+    const totalLeads = currentLeads.length;
+    const totalCustomers = converted.length;
+    const conversionRate = totalLeads ? (totalCustomers / totalLeads) * 100 : 0;
+    const attributedRevenue = revenueOf(converted);
+    const totalInvestment = businessCampaigns.reduce((sum, campaign) => sum + parseInvestment(campaign), 0);
+    const activeLeads = allLeads.filter(lead => !['customer', 'lost'].includes(lead.status));
+    const potentialPipelineValue = activeLeads.reduce((sum, lead) => sum + numeric(lead.potential_value), 0);
+
+    const previousConversionRate = previousLeads.length ? (previousConverted.length / previousLeads.length) * 100 : 0;
+    const stages = Object.fromEntries(['new', 'contacted', 'interested', 'proposal', 'customer', 'lost'].map(status => [status, { count: 0, value: 0 }]));
+    const lostCounts = {};
+    const sourceCounts = {};
+    let conversionDays = 0;
+    let conversionDates = 0;
+
+    for (const lead of allLeads) {
+      if (stages[lead.status]) {
+        stages[lead.status].count++;
+        stages[lead.status].value += numeric(lead.potential_value || lead.actual_value);
+      }
+      if (lead.status === 'lost') {
+        const reason = lead.lost_reason || 'Outros / Não informado';
+        lostCounts[reason] = (lostCounts[reason] || 0) + 1;
+      }
+      const source = lead.source || 'Outros';
+      sourceCounts[source] ||= { leads: 0, customers: 0, revenue: 0, potential: 0 };
+      sourceCounts[source].leads++;
+      if (lead.status === 'customer') {
+        sourceCounts[source].customers++;
+        sourceCounts[source].revenue += numeric(lead.actual_value);
+        if (lead.created_at && lead.converted_at) {
+          conversionDays += Math.max(0, (new Date(lead.converted_at) - new Date(lead.created_at)) / 86400000);
+          conversionDates++;
+        }
+      } else if (lead.status !== 'lost') sourceCounts[source].potential += numeric(lead.potential_value);
+    }
+
+    const totalLost = Object.values(lostCounts).reduce((sum, count) => sum + count, 0);
+    const lostReasons = Object.entries(lostCounts).map(([reason, count]) => ({
+      reason, count, percentage: totalLost ? (count / totalLost) * 100 : 0,
+    })).sort((a, b) => b.count - a.count);
+
+    const campaigns = businessCampaigns.map(campaign => {
+      const campaignLeads = allLeads.filter(lead => lead.campaign_id === campaign.id);
+      const customers = campaignLeads.filter(lead => lead.status === 'customer');
+      const investment = parseInvestment(campaign);
+      const revenue = revenueOf(customers);
+      return {
+        id: campaign.id,
+        name: campaign.name,
+        status: campaign.status,
+        investment,
+        crm: {
+          leads: campaignLeads.length,
+          customers: customers.length,
+          conversionRate: campaignLeads.length ? (customers.length / campaignLeads.length) * 100 : 0,
+          revenue,
+          cpl: campaignLeads.length && investment ? investment / campaignLeads.length : null,
+          cac: customers.length && investment ? investment / customers.length : null,
+          roas: investment ? revenue / investment : null,
+        },
+        manual: { leads: campaign.leads, revenue: campaign.revenue_generated },
+        hasDiscrepancy: campaign.leads != null && numeric(campaign.leads) !== campaignLeads.length,
+      };
+    });
+
+    const channels = Object.entries(sourceCounts).map(([channel, values]) => ({
+      channel,
+      leads: values.leads,
+      customers: values.customers,
+      conversionRate: values.leads ? (values.customers / values.leads) * 100 : 0,
+      revenue: values.revenue,
+      potentialValue: values.potential,
+    })).sort((a, b) => b.leads - a.leads);
+
+    const distribution = {};
+    for (const item of content) distribution[item.channel || 'Outros'] = (distribution[item.channel || 'Outros'] || 0) + 1;
+    const published = content.filter(item => item.status === 'published').length;
+
+    const timelineMap = {};
+    for (let cursor = new Date(start); cursor <= end; cursor.setDate(cursor.getDate() + 1)) {
+      const key = cursor.toISOString().slice(0, 10);
+      timelineMap[key] = { date: key, leads: 0, customers: 0, revenue: 0 };
+    }
+    for (const lead of currentLeads) {
+      const key = new Date(lead.created_at).toISOString().slice(0, 10);
+      if (timelineMap[key]) timelineMap[key].leads++;
+    }
+    for (const lead of converted) {
+      const key = new Date(lead.converted_at).toISOString().slice(0, 10);
+      if (timelineMap[key]) {
+        timelineMap[key].customers++;
+        timelineMap[key].revenue += numeric(lead.actual_value);
+      }
+    }
+
+    res.json({
+      period,
+      startDate: start,
+      endDate: end,
+      overview: {
+        totalLeads,
+        totalCustomers,
+        conversionRate,
+        attributedRevenue,
+        potentialPipelineValue,
+        totalInvestment,
+        cpl: totalLeads && totalInvestment ? totalInvestment / totalLeads : null,
+        cac: totalCustomers && totalInvestment ? totalInvestment / totalCustomers : null,
+        roas: totalInvestment ? attributedRevenue / totalInvestment : null,
+        changes: {
+          leads: change(totalLeads, previousLeads.length),
+          customers: change(totalCustomers, previousConverted.length),
+          conversionRate: change(conversionRate, previousConversionRate),
+          revenue: change(attributedRevenue, revenueOf(previousConverted)),
+        },
+      },
+      pipeline: { stages, avgConversionTimeDays: conversionDates ? conversionDays / conversionDates : null },
+      lostReasons,
+      campaigns,
+      channels,
+      contentExecution: {
+        planned: content.length,
+        published,
+        percentage: content.length ? (published / content.length) * 100 : 0,
+        distribution,
+      },
+      timeline: Object.values(timelineMap),
+    });
+  } catch (e) {
+    console.error('[analytics-overview]', e.message);
+    res.status(500).json({ error: e.message || 'Falha ao carregar Analytics.' });
+  } finally { pool.end().catch(() => {}); }
+});
+
+app.get('/api/analytics/export', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const leads = (await pool.query('SELECT * FROM leads WHERE business_id=$1 ORDER BY created_at DESC', [authorized.business.id])).rows;
+    const csvCell = value => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    const rows = leads.map(lead => [
+      lead.id, lead.name, lead.company_name, lead.email, lead.phone, lead.status, lead.source,
+      lead.potential_value, lead.actual_value, lead.created_at?.toISOString?.() || lead.created_at,
+      lead.converted_at?.toISOString?.() || lead.converted_at,
+    ].map(csvCell).join(','));
+    const header = 'ID,Nome,Empresa,Email,Telefone,Status,Origem,Valor Potencial,Valor Real,Data Criação,Data Conversão';
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename=analytics.csv');
+    res.send('\uFEFF' + [header, ...rows].join('\n'));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+app.get('/api/analytics/insights', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const counts = (await pool.query(
+      `SELECT COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE status='customer')::int AS customers,
+              COUNT(*) FILTER (WHERE status='proposal')::int AS proposals
+       FROM leads WHERE business_id=$1`,
+      [authorized.business.id]
+    )).rows[0];
+    const observation = counts.total
+      ? `Há ${counts.total} leads, ${counts.proposals} propostas e ${counts.customers} clientes registrados.`
+      : 'Ainda não há leads suficientes para gerar uma análise detalhada.';
+    res.json({ insights: [{
+      title: counts.total ? 'Panorama comercial' : 'Comece pela base de dados',
+      observation,
+      recommended_action: counts.total ? 'Revise as propostas abertas e mantenha os próximos contatos atualizados.' : 'Cadastre ou importe leads para acompanhar conversão e desempenho.',
+      confidence: 'high',
+    }] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
 app.get('/api/analytics/summary', async (req, res) => {
   const pool = createPool();
   try {
