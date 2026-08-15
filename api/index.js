@@ -20,6 +20,7 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '4mb' }));
 
 const JWT_SECRET = process.env.JWT_SECRET || 'mkt-agro-bw-secret-key-2026';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
 
 function getDbUrl() {
   const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
@@ -182,14 +183,14 @@ Empresa: ${biz?.name} - ${biz?.segment}. Descrição: ${biz?.description}
 Produtos: ${prods.map(p => p.name + ' (' + p.type + ')').join(', ')}
 Responda em JSON com: business_summary (string), positioning_statement (string), value_proposition (string).`;
 
-        const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt, config: { responseMimeType: 'application/json', temperature: 0.7 } });
+        const response = await ai.models.generateContent({ model: GEMINI_MODEL, contents: prompt, config: { responseMimeType: 'application/json' } });
         const parsed = JSON.parse(response.text || '{}');
         const orgResult = await pool.query('SELECT organization_id FROM businesses WHERE id=$1', [businessId]);
         const stratResult = await pool.query('INSERT INTO strategies (business_id, business_summary, positioning_statement, value_proposition) VALUES ($1,$2,$3,$4) RETURNING *',
           [businessId, parsed.business_summary, parsed.positioning_statement, parsed.value_proposition]);
         strategy = stratResult.rows[0];
         await pool.query('INSERT INTO ai_generations (organization_id, business_id, type, provider, model, output) VALUES ($1,$2,$3,$4,$5,$6)',
-          [orgResult.rows[0]?.organization_id, businessId, 'initial_strategy', 'gemini', 'gemini-2.5-flash', JSON.stringify(parsed)]);
+          [orgResult.rows[0]?.organization_id, businessId, 'initial_strategy', 'gemini', GEMINI_MODEL, JSON.stringify(parsed)]);
       }
     } catch (aiErr) { console.error('[onboarding-ai]', aiErr.message); }
 
@@ -298,9 +299,9 @@ ${JSON.stringify(context, null, 2)}
 Retorne somente JSON válido neste formato:
 {"business_summary":"...","ideal_customer":{"description":"...","main_pains":["..."],"main_desires":["..."],"main_objections":["..."]},"positioning":{"statement":"...","value_proposition":"...","differentiators":["..."]},"priority_channels":[{"channel":"...","priority":1,"reason":"..."}],"opportunities":[{"title":"...","description":"...","impact":"high"}],"plan_30_days":[{"week":1,"objective":"...","actions":["..."]},{"week":2,"objective":"...","actions":["..."]},{"week":3,"objective":"...","actions":["..."]},{"week":4,"objective":"...","actions":["..."]}]}`;
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: GEMINI_MODEL,
         contents: prompt,
-        config: { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 5000 },
+        config: { responseMimeType: 'application/json', maxOutputTokens: 5000 },
       });
       generated = JSON.parse(response.text || '{}');
     } else {
@@ -368,7 +369,7 @@ Retorne somente JSON válido neste formato:
     await client.query(
       `INSERT INTO ai_generations (organization_id, business_id, type, provider, model, output)
        VALUES ($1,$2,'initial_strategy',$3,$4,$5)`,
-      [business.organization_id, business.id, process.env.GEMINI_API_KEY ? 'gemini' : 'fallback', process.env.GEMINI_API_KEY ? 'gemini-2.5-flash' : 'deterministic', JSON.stringify(generated)]
+      [business.organization_id, business.id, process.env.GEMINI_API_KEY ? 'gemini' : 'fallback', process.env.GEMINI_API_KEY ? GEMINI_MODEL : 'deterministic', JSON.stringify(generated)]
     );
     await client.query('COMMIT');
     res.json({ success: true, strategy: strategyForClient(strategy) });
@@ -497,9 +498,9 @@ Regras:
 - Retorne somente JSON válido neste formato:
 {"content_items":[{"scheduled_date":"YYYY-MM-DD","title":"...","topic":"...","channel":"...","format":"...","funnel_stage":"awareness","objective":"...","brief":"..."}]}`;
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: GEMINI_MODEL,
         contents: prompt,
-        config: { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 5000 },
+        config: { responseMimeType: 'application/json', maxOutputTokens: 5000 },
       });
       aiOutput = JSON.parse(response.text || '{}');
       items = Array.isArray(aiOutput.content_items) ? aiOutput.content_items : [];
@@ -562,7 +563,7 @@ Regras:
     await client.query(
       `INSERT INTO ai_generations (organization_id, business_id, type, provider, model, output)
        VALUES ($1,$2,'content_calendar',$3,$4,$5)`,
-      [business.organization_id, businessId, process.env.GEMINI_API_KEY ? 'gemini' : 'fallback', process.env.GEMINI_API_KEY ? 'gemini-2.5-flash' : 'deterministic', JSON.stringify(aiOutput)]
+      [business.organization_id, businessId, process.env.GEMINI_API_KEY ? 'gemini' : 'fallback', process.env.GEMINI_API_KEY ? GEMINI_MODEL : 'deterministic', JSON.stringify(aiOutput)]
     );
     await client.query('COMMIT');
     res.json({ success: true, items: saved });
@@ -745,9 +746,9 @@ Não invente preços, descontos, depoimentos, garantias ou resultados. Se não h
 Retorne somente JSON válido:
 {"campaign_name":"...","campaign_summary":"...","target_audience":{"description":"...","main_pain":"...","main_desire":"...","main_objection":"..."},"offer":{"description":"...","value_proposition":"...","urgency":"..."},"main_argument":"...","messaging":{"main_message":"...","supporting_arguments":["..."]},"plan_actions":["..."]}`;
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: GEMINI_MODEL,
         contents: prompt,
-        config: { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 3000 },
+        config: { responseMimeType: 'application/json', maxOutputTokens: 3000 },
       });
       result = JSON.parse(response.text || '{}');
     } else {
@@ -805,7 +806,7 @@ Retorne somente JSON válido:
     await client.query(
       `INSERT INTO ai_generations (organization_id, business_id, type, provider, model, output)
        VALUES ($1,$2,'campaign_generation',$3,$4,$5)`,
-      [business.organization_id, businessId, process.env.GEMINI_API_KEY ? 'gemini' : 'fallback', process.env.GEMINI_API_KEY ? 'gemini-2.5-flash' : 'deterministic', JSON.stringify(result)]
+      [business.organization_id, businessId, process.env.GEMINI_API_KEY ? 'gemini' : 'fallback', process.env.GEMINI_API_KEY ? GEMINI_MODEL : 'deterministic', JSON.stringify(result)]
     );
     await client.query('COMMIT');
     res.json(campaignForClient({ ...campaign, channels: savedChannels, tasks: savedTasks, assets: [] }));
@@ -1286,9 +1287,9 @@ ${message}
 Forneça uma resposta útil e, quando fizer sentido, finalize com até 3 próximos passos objetivos.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: GEMINI_MODEL,
       contents: prompt,
-      config: { temperature: 0.5, maxOutputTokens: 1200 },
+      config: { maxOutputTokens: 1200 },
     });
     const answer = String(response.text || '').trim();
     if (!answer) throw new Error('O assistente não retornou uma resposta.');

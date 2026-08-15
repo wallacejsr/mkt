@@ -136,7 +136,6 @@ ${context}`;
         config: {
           responseMimeType: 'application/json',
           responseSchema: schema,
-          temperature: 0.7,
         }
       });
 
@@ -255,7 +254,6 @@ Regras de Distribuição:
       config: {
         responseMimeType: 'application/json',
         responseSchema: schema,
-        temperature: 0.7,
       }
     });
 
@@ -312,7 +310,6 @@ ${JSON.stringify(strategyDetails, null, 2)}`;
       config: {
         responseMimeType: 'application/json',
         responseSchema: schema,
-        temperature: 0.7,
       }
     });
 
@@ -356,7 +353,6 @@ Retorne APENAS o texto modificado, mantendo a coerência.`;
       config: {
         responseMimeType: 'application/json',
         responseSchema: schema,
-        temperature: 0.7,
       }
     });
 
@@ -436,7 +432,6 @@ Regras de Ouro:
       config: {
         responseMimeType: 'application/json',
         responseSchema: schema,
-        temperature: 0.7,
       }
     });
 
@@ -546,7 +541,6 @@ ${JSON.stringify(contextData, null, 2)}
       config: {
         responseMimeType: 'application/json',
         responseSchema: schema,
-        temperature: 0.7,
       }
     });
 

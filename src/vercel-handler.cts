@@ -216,9 +216,9 @@ Público: ${auds[0]?.profile || 'Não definido'}
 Responda em JSON com: business_summary (string), positioning_statement (string), value_proposition (string), channels (array de strings com até 3 canais prioritários), opportunities (array de objetos {title, description, impact}).`;
 
         const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
+          model: process.env.GEMINI_MODEL || 'gemini-3.6-flash',
           contents: prompt,
-          config: { responseMimeType: 'application/json', temperature: 0.7 }
+          config: { responseMimeType: 'application/json' }
         });
         
         const parsed = JSON.parse(response.text || '{}');
@@ -236,7 +236,7 @@ Responda em JSON com: business_summary (string), positioning_statement (string),
         // Save AI generation log
         await pool.query(
           'INSERT INTO ai_generations (organization_id, business_id, type, provider, model, output) VALUES ($1,$2,$3,$4,$5,$6)',
-          [orgId, businessId, 'initial_strategy', 'gemini', 'gemini-2.5-flash', JSON.stringify(parsed)]
+          [orgId, businessId, 'initial_strategy', 'gemini', process.env.GEMINI_MODEL || 'gemini-3.6-flash', JSON.stringify(parsed)]
         );
       }
     } catch (aiErr: any) {

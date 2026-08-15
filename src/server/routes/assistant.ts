@@ -56,9 +56,9 @@ assistantRouter.post('/chat', requireAuth, async (req: any, res) => {
 
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: process.env.GEMINI_MODEL || 'gemini-3.6-flash',
       contents: `Você é o Assistente de Marketing e Vendas do Marketing OS. Responda em português do Brasil de forma prática e direta. Use somente os dados fornecidos; não invente resultados. Quando faltarem dados, informe isso. Não diga que executou ações.\n\nDADOS:\n${JSON.stringify(context)}\n\nHISTÓRICO:\n${history || 'Sem histórico.'}\n\nPERGUNTA:\n${message}`,
-      config: { temperature: 0.5, maxOutputTokens: 1200 },
+      config: { maxOutputTokens: 1200 },
     });
     const answer = String(response.text || '').trim();
     if (!answer) throw new Error('Resposta vazia do assistente.');
