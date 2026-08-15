@@ -5272,3 +5272,4 @@ app2.use((req, res, next) => {
   app(req, res, next);
 });
 var vercel_handler_default = app2;
+module.exports = vercel_handler_default;
