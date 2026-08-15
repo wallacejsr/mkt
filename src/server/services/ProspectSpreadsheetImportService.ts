@@ -17,7 +17,11 @@ type SpreadsheetRow = {
 };
 
 const clean = (value: unknown, max = 500) => {
-  const text = String(value ?? '').trim();
+  const text = String(value ?? '')
+    .replace(/\u0000/g, '')
+    .replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   return text ? text.slice(0, max) : null;
 };
 

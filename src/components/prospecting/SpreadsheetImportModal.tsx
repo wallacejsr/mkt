@@ -23,6 +23,7 @@ interface ImportedRow {
 }
 
 const normalizeHeader = (value: unknown) => String(value || '')
+  .replace(/\u0000/g, '')
   .normalize('NFD')
   .replace(/[\u0300-\u036f]/g, '')
   .trim()
@@ -32,7 +33,14 @@ const normalizeHeader = (value: unknown) => String(value || '')
 const valueOf = (row: Record<string, unknown>, ...headers: string[]) => {
   for (const header of headers) {
     const value = row[normalizeHeader(header)];
-    if (value !== undefined && value !== null && String(value).trim()) return String(value).trim();
+    if (value !== undefined && value !== null) {
+      const sanitized = String(value)
+        .replace(/\u0000/g, '')
+        .replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (sanitized) return sanitized;
+    }
   }
   return '';
 };
