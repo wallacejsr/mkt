@@ -1123,6 +1123,25 @@ function digitsOnly(value, maxLength = 20) {
   return valueDigits && !/^0+$/.test(valueDigits) ? valueDigits.slice(0, maxLength) : null;
 }
 
+function defaultProspectApproach(business, prospect, offerProduct) {
+  const ourSolution = cleanSpreadsheetValue(offerProduct, 200)
+    || cleanSpreadsheetValue(business.description, 240)
+    || cleanSpreadsheetValue(business.segment, 120)
+    || 'soluções de marketing e desenvolvimento comercial';
+  const location = [prospect.city, prospect.state].filter(Boolean).join(', ');
+  return {
+    subject: `Possível parceria com a ${prospect.company_name}`,
+    opening: `Olá, equipe da ${prospect.company_name}. Tudo bem?`,
+    message: `Meu nome é da equipe da ${business.name}. Trabalhamos com ${ourSolution} e identificamos que a ${prospect.company_name}${prospect.segment ? ` atua no segmento de ${prospect.segment}` : ''}${location ? ` em ${location}` : ''}. Gostaria de entender se existe espaço para conversarmos sobre oportunidades que façam sentido para o momento da empresa.`,
+    cta: 'Podemos agendar uma conversa breve, de 10 minutos, nos próximos dias?',
+  };
+}
+
+function parseGeminiJson(text) {
+  const cleaned = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  return JSON.parse(cleaned || '{}');
+}
+
 function normalizeProspectingText(value) {
   return String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
 }
@@ -1456,6 +1475,96 @@ app.patch('/api/prospecting/prospects/status', async (req, res) => {
     res.json({ updatedCount: updated.rowCount || 0 });
   } catch (e) { res.status(500).json({ error: e.message }); }
   finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/prospecting/prospects/:id/generate-approach', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const prospect = (await pool.query(
+      'SELECT * FROM prospects WHERE id=$1 AND business_id=$2 LIMIT 1',
+      [req.params.id, authorized.business.id]
+    )).rows[0];
+    if (!prospect) return res.status(404).json({ error: 'Prospect não encontrado.' });
+
+    const fallback = defaultProspectApproach(authorized.business, prospect, req.body?.offerProduct);
+    let approach = fallback;
+    let source = 'template';
+    if (process.env.GEMINI_API_KEY) {
+      try {
+        const { GoogleGenAI } = await import('@google/genai');
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const prompt = `Crie uma abordagem comercial B2B curta, ética e personalizada em português do Brasil.
+Não invente relacionamento anterior, resultados ou fatos. Não envie nada; produza apenas uma minuta.
+
+NOSSA EMPRESA:
+- Nome: ${authorized.business.name}
+- Segmento: ${authorized.business.segment || 'não informado'}
+- Descrição: ${authorized.business.description || 'não informada'}
+- Oferta: ${cleanSpreadsheetValue(req.body?.offerProduct, 200) || 'solução principal da empresa'}
+
+PROSPECT:
+- Empresa: ${prospect.company_name}
+- Segmento: ${prospect.segment || 'não informado'}
+- Cidade/UF: ${[prospect.city, prospect.state].filter(Boolean).join('/') || 'não informado'}
+- Observações: ${cleanSpreadsheetValue(prospect.notes || prospect.description, 600) || 'sem observações'}
+
+Responda somente em JSON:
+{"subject":"assunto","opening":"saudação","message":"mensagem","cta":"chamada para ação"}`;
+        const response = await ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: prompt,
+          config: { responseMimeType: 'application/json', maxOutputTokens: 700 },
+        });
+        const generated = parseGeminiJson(response.text);
+        approach = {
+          subject: cleanSpreadsheetValue(generated.subject, 200) || fallback.subject,
+          opening: cleanSpreadsheetValue(generated.opening, 300) || fallback.opening,
+          message: cleanSpreadsheetValue(generated.message, 1800) || fallback.message,
+          cta: cleanSpreadsheetValue(generated.cta, 400) || fallback.cta,
+        };
+        source = 'gemini';
+      } catch (aiError) {
+        console.warn('[prospecting-generate-approach-ai]', aiError.message);
+      }
+    }
+    res.json({ approach, source });
+  } catch (e) {
+    console.error('[prospecting-generate-approach]', e.message);
+    res.status(500).json({ error: e.message || 'Falha ao gerar proposta de abordagem.' });
+  } finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/prospecting/prospects/:id/qualify', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const prospect = (await pool.query(
+      'SELECT * FROM prospects WHERE id=$1 AND business_id=$2 LIMIT 1',
+      [req.params.id, authorized.business.id]
+    )).rows[0];
+    if (!prospect) return res.status(404).json({ error: 'Prospect não encontrado.' });
+    let score = 35;
+    if (prospect.tax_id) score += 10;
+    if (prospect.email) score += 15;
+    if (prospect.phone) score += 15;
+    if (prospect.segment) score += 10;
+    if (prospect.city) score += 5;
+    score = Math.min(100, score);
+    const fit = score >= 75 ? 'high' : score >= 50 ? 'medium' : 'low';
+    const reason = `Qualificação baseada na completude dos dados disponíveis: ${[prospect.email && 'e-mail', prospect.phone && 'telefone', prospect.tax_id && 'CNPJ/CPF', prospect.segment && 'segmento'].filter(Boolean).join(', ') || 'cadastro básico'}.`;
+    const updated = (await pool.query(
+      `UPDATE prospects SET qualification_score=$1, qualification_fit=$2, qualification_reason=$3,
+       possible_need=$4, status=$5, updated_at=NOW() WHERE id=$6 AND business_id=$7 RETURNING *`,
+      [score, fit, reason, `Possível interesse em ${authorized.business.segment || 'soluções comerciais e de marketing'}.`, fit === 'high' ? 'qualified' : 'reviewed', prospect.id, authorized.business.id]
+    )).rows[0];
+    res.json({ prospect: prospectForClient(updated), qualification: { score, fit, reason } });
+  } catch (e) {
+    console.error('[prospecting-qualify]', e.message);
+    res.status(500).json({ error: e.message || 'Falha ao qualificar prospect.' });
+  } finally { pool.end().catch(() => {}); }
 });
 
 app.post('/api/prospecting/prospects/import', async (req, res) => {

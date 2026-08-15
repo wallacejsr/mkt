@@ -120,8 +120,8 @@ export function ProspectDrawer({ prospectId, onClose, onImportToCRM, onRefreshPr
       const res = await authFetch(`/api/prospecting/prospects/${prospect.id}/qualify?businessId=${business?.id}`, {
         method: 'POST',
       });
-      if (!res.ok) throw new Error('Falha ao qualificar prospect.');
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Falha ao qualificar prospect.');
       setProspect(data.prospect);
       onRefreshProspects();
     } catch (err: any) {
@@ -140,8 +140,9 @@ export function ProspectDrawer({ prospectId, onClose, onImportToCRM, onRefreshPr
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
       });
-      if (!res.ok) throw new Error('Falha ao gerar proposta de abordagem.');
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Falha ao gerar proposta de abordagem.');
+      if (!data.approach?.subject || !data.approach?.message) throw new Error('A abordagem retornada está incompleta. Tente novamente.');
       onOpenApproach(prospect.companyName, data.approach);
     } catch (err: any) {
       alert(err.message || 'Erro ao gerar proposta de abordagem.');
