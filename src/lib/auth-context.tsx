@@ -13,6 +13,23 @@ export interface Business {
   onboardingCompleted: boolean;
 }
 
+type BusinessApiResponse = Partial<Business> & {
+  id: string;
+  name: string;
+  onboarding_completed?: boolean;
+};
+
+/** Normalizes PostgreSQL snake_case fields to the shape used by the React app. */
+function normalizeBusiness(rawBusiness: BusinessApiResponse | null | undefined): Business | null {
+  if (!rawBusiness) return null;
+
+  return {
+    id: rawBusiness.id,
+    name: rawBusiness.name,
+    onboardingCompleted: rawBusiness.onboardingCompleted ?? rawBusiness.onboarding_completed ?? false,
+  };
+}
+
 interface AuthContextType {
   user: AuthUser | null;
   business: Business | null;
@@ -99,7 +116,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const data = await parseJsonResponse(res);
       if (res.ok && data) {
         setUser(data.user);
-        setBusiness(data.business);
+        setBusiness(normalizeBusiness(data.business));
       } else {
         localStorage.removeItem(TOKEN_KEY);
         setToken(null);
@@ -148,7 +165,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem(TOKEN_KEY, data.token);
     setToken(data.token);
     setUser(data.user);
-    setBusiness(data.business);
+    setBusiness(normalizeBusiness(data.business));
   };
 
   const signUp = async (name: string, email: string, password: string) => {
@@ -171,7 +188,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem(TOKEN_KEY, data.token);
     setToken(data.token);
     setUser(data.user);
-    setBusiness(data.business);
+    setBusiness(normalizeBusiness(data.business));
   };
 
   const signOut = async () => {
