@@ -13,6 +13,7 @@ export function ContentEditorPage() {
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [refining, setRefining] = useState(false);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     fetchItem();
@@ -20,15 +21,23 @@ export function ContentEditorPage() {
 
   const fetchItem = async () => {
     if (!id || !business || !token) return;
+    setLoading(true);
+    setError('');
     try {
       const res = await fetch(`/api/content/${id}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (res.ok) {
         setItem(await res.json());
+      } else {
+        const data = await res.json().catch(() => null);
+        setItem(null);
+        setError(data?.error || 'Não foi possível carregar este conteúdo.');
       }
     } catch (e) {
       console.error(e);
+      setItem(null);
+      setError('Não foi possível conectar ao servidor.');
     } finally {
       setLoading(false);
     }
@@ -53,6 +62,9 @@ export function ContentEditorPage() {
         if (status === 'published') {
           alert('Conteúdo marcado como publicado!');
         }
+      } else {
+        const data = await res.json().catch(() => null);
+        alert(data?.error || 'Erro ao salvar o conteúdo.');
       }
     } catch (e) {
       alert('Erro ao salvar.');
@@ -72,7 +84,8 @@ export function ContentEditorPage() {
       if (res.ok) {
         setItem(await res.json());
       } else {
-        alert('Erro ao gerar conteúdo.');
+        const data = await res.json().catch(() => null);
+        alert(data?.error ? `Erro ao gerar conteúdo: ${data.error}` : 'Erro ao gerar conteúdo.');
       }
     } catch (e) {
       alert('Erro de conexão.');
@@ -96,6 +109,9 @@ export function ContentEditorPage() {
       if (res.ok) {
         const data = await res.json();
         setItem((prev: any) => ({ ...prev, [field]: data.refinedText }));
+      } else {
+        const data = await res.json().catch(() => null);
+        alert(data?.error || 'Erro ao refinar o texto.');
       }
     } catch (e) {
       alert('Erro ao refinar.');
@@ -105,7 +121,15 @@ export function ContentEditorPage() {
   };
 
   if (loading) return <div className="p-8 text-center text-slate-500">Carregando editor...</div>;
-  if (!item) return <div className="p-8 text-center text-red-500">Conteúdo não encontrado.</div>;
+  if (!item) return (
+    <div className="p-8 text-center space-y-4">
+      <p className="text-red-500">{error || 'Conteúdo não encontrado.'}</p>
+      <div className="flex justify-center gap-3">
+        <button onClick={fetchItem} className="px-4 py-2 text-sm font-medium bg-indigo-600 text-white rounded-lg">Tentar novamente</button>
+        <button onClick={() => navigate('/content')} className="px-4 py-2 text-sm font-medium border border-slate-300 rounded-lg">Voltar aos conteúdos</button>
+      </div>
+    </div>
+  );
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 pb-20">

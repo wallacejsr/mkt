@@ -594,6 +594,170 @@ app.post('/api/content', async (req, res) => {
   finally { pool.end().catch(() => {}); }
 });
 
+async function authorizedContentItem(pool, req, itemId) {
+  const decoded = verifyToken(req);
+  if (!decoded) return { error: 401, message: 'Não autenticado.' };
+  const item = (await pool.query(
+    `SELECT ci.* FROM content_items ci
+     JOIN businesses b ON b.id=ci.business_id
+     JOIN organization_members om ON om.organization_id=b.organization_id
+     WHERE ci.id=$1 AND om.user_id=$2 LIMIT 1`,
+    [itemId, decoded.userId]
+  )).rows[0];
+  if (!item) return { error: 404, message: 'Conteúdo não encontrado.' };
+  return { item };
+}
+
+app.post('/api/content/:id/generate', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await authorizedContentItem(pool, req, req.params.id);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const item = authorized.item;
+    const [businessResult, strategyResult, productsResult, audienceResult] = await Promise.all([
+      pool.query('SELECT * FROM businesses WHERE id=$1', [item.business_id]),
+      pool.query('SELECT * FROM strategies WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [item.business_id]),
+      pool.query('SELECT name, type, description, main_benefit, differentiators FROM products WHERE business_id=$1 ORDER BY created_at DESC LIMIT 10', [item.business_id]),
+      pool.query('SELECT description, profile, pains, desires, objections FROM target_audiences WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [item.business_id]),
+    ]);
+    const business = businessResult.rows[0];
+    const context = {
+      business: { name: business.name, segment: business.segment, description: business.description },
+      strategy: strategyResult.rows[0] || null,
+      products: productsResult.rows,
+      audience: audienceResult.rows[0] || null,
+    };
+
+    let generated;
+    if (process.env.GEMINI_API_KEY) {
+      const { GoogleGenAI } = await import('@google/genai');
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const prompt = `Você é um copywriter sênior. Crie um conteúdo em português do Brasil usando somente os dados fornecidos. Não invente preços, descontos, depoimentos, garantias ou resultados.
+
+ITEM:
+- Título/Tema: ${item.title || item.topic || ''}
+- Briefing: ${item.topic || ''}
+- Canal: ${item.channel || ''}
+- Formato: ${item.format || ''}
+- Etapa do funil: ${item.funnel_stage || ''}
+- Objetivo: ${item.objective || ''}
+
+CONTEXTO:
+${JSON.stringify(context, null, 2)}
+
+Retorne somente JSON válido:
+{"title":"...","hook":"...","body":"...","caption":"...","cta":"...","hashtags":["..."],"visual_direction":"...","video_script":"..."}`;
+      const response = await ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: prompt,
+        config: { responseMimeType: 'application/json', maxOutputTokens: 3000 },
+      });
+      generated = JSON.parse(response.text || '{}');
+    } else {
+      generated = {
+        title: item.title || item.topic || 'Novo conteúdo',
+        hook: `Você já pensou em como ${item.topic || business.segment || 'esta solução'} pode apoiar seus objetivos?`,
+        body: `${business.name} atua com ${business.segment || 'soluções especializadas'} e ajuda clientes a encontrar alternativas alinhadas às suas necessidades. ${item.topic || business.description || ''}`.trim(),
+        caption: item.topic || business.description || '',
+        cta: 'Entre em contato para saber mais.',
+        hashtags: [],
+        visual_direction: `Utilizar identidade visual da marca em uma composição adequada para ${item.channel || 'o canal selecionado'}.`,
+        video_script: '',
+      };
+    }
+    if (!generated.body && !generated.caption) throw new Error('A IA não retornou um conteúdo válido.');
+
+    const updated = (await pool.query(
+      `UPDATE content_items SET title=$1, hook=$2, body=$3, caption=$4, cta=$5, hashtags=$6,
+       visual_direction=$7, video_script=$8, status='draft', updated_at=NOW() WHERE id=$9 RETURNING *`,
+      [
+        generated.title || item.title, generated.hook || null, generated.body || null, generated.caption || null,
+        generated.cta || null, JSON.stringify(Array.isArray(generated.hashtags) ? generated.hashtags : []),
+        generated.visual_direction || null, generated.video_script || null, item.id,
+      ]
+    )).rows[0];
+    await pool.query(
+      `INSERT INTO ai_generations (organization_id, business_id, type, provider, model, output)
+       VALUES ($1,$2,'content_item',$3,$4,$5)`,
+      [item.organization_id, item.business_id, process.env.GEMINI_API_KEY ? 'gemini' : 'fallback', process.env.GEMINI_API_KEY ? GEMINI_MODEL : 'deterministic', JSON.stringify(generated)]
+    );
+    res.json(contentForClient(updated));
+  } catch (e) {
+    console.error('[content-generate]', e.message);
+    res.status(500).json({ error: e.message || 'Não foi possível gerar o conteúdo.' });
+  } finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/content/:id/refine', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await authorizedContentItem(pool, req, req.params.id);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const currentText = String(req.body?.currentText || '').trim();
+    const instruction = String(req.body?.instruction || '').trim();
+    if (!currentText || !instruction) return res.status(400).json({ error: 'Texto e instrução são obrigatórios.' });
+    if (currentText.length > 12000 || instruction.length > 1000) return res.status(400).json({ error: 'Texto muito extenso para refinamento.' });
+
+    let refinedText;
+    if (process.env.GEMINI_API_KEY) {
+      const { GoogleGenAI } = await import('@google/genai');
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: `Você é um editor de texto de marketing. Reescreva somente o texto abaixo seguindo a instrução, preservando fatos e sem inventar preços, promessas ou resultados. Responda apenas com o texto final.\n\nINSTRUÇÃO: ${instruction}\n\nTEXTO:\n${currentText}`,
+        config: { maxOutputTokens: 2000 },
+      });
+      refinedText = String(response.text || '').trim();
+    } else {
+      refinedText = currentText;
+    }
+    if (!refinedText) throw new Error('A IA não retornou o texto refinado.');
+    res.json({ refinedText });
+  } catch (e) {
+    console.error('[content-refine]', e.message);
+    res.status(500).json({ error: e.message || 'Não foi possível refinar o texto.' });
+  } finally { pool.end().catch(() => {}); }
+});
+
+app.get('/api/content/:id', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await authorizedContentItem(pool, req, req.params.id);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    res.json(contentForClient(authorized.item));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+app.put('/api/content/:id', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await authorizedContentItem(pool, req, req.params.id);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const current = authorized.item;
+    const body = req.body || {};
+    const status = ['idea', 'draft', 'ready', 'published'].includes(body.status) ? body.status : current.status;
+    const publishedAt = status === 'published' && current.status !== 'published' ? new Date() : current.published_at;
+    const updated = (await pool.query(
+      `UPDATE content_items SET title=$1, topic=$2, channel=$3, format=$4, funnel_stage=$5, objective=$6,
+       scheduled_date=$7, status=$8, hook=$9, body=$10, caption=$11, cta=$12, hashtags=$13,
+       visual_direction=$14, video_script=$15, published_at=$16, updated_at=NOW()
+       WHERE id=$17 RETURNING *`,
+      [
+        String(body.title ?? current.title).slice(0, 500), body.topic ?? current.topic, body.channel ?? current.channel,
+        body.format ?? current.format, body.funnelStage ?? current.funnel_stage, body.objective ?? current.objective,
+        body.scheduledDate || null, status, body.hook ?? current.hook, body.body ?? current.body,
+        body.caption ?? current.caption, body.cta ?? current.cta,
+        JSON.stringify(Array.isArray(body.hashtags) ? body.hashtags : (current.hashtags || [])),
+        body.visualDirection ?? current.visual_direction, body.videoScript ?? current.video_script,
+        publishedAt, current.id,
+      ]
+    )).rows[0];
+    res.json(contentForClient(updated));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
 // ─── Campaigns ────────────────────────────────────────────────────────────────
 app.get('/api/businesses/:id/context', async (req, res) => {
   const pool = createPool();
