@@ -96,7 +96,8 @@ export function NewCampaignPage() {
         const campaign = await res.json();
         navigate(`/campaigns/${campaign.id}`);
       } else {
-        alert("Erro ao gerar campanha.");
+        const error = await res.json().catch(() => null);
+        alert(error?.error ? `Erro ao gerar campanha: ${error.error}` : "Erro ao gerar campanha.");
       }
     } catch (error) {
       console.error(error);

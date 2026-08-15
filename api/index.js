@@ -199,26 +199,223 @@ Responda em JSON com: business_summary (string), positioning_statement (string),
 });
 
 // ─── Strategy ─────────────────────────────────────────────────────────────────
+function strategyForClient(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    businessId: row.business_id,
+    businessSummary: row.business_summary,
+    idealCustomerDesc: row.ideal_customer_desc,
+    idealCustomerPains: row.ideal_customer_pains || [],
+    idealCustomerDesires: row.ideal_customer_desires || [],
+    idealCustomerObjections: row.ideal_customer_objections || [],
+    positioningStatement: row.positioning_statement,
+    valueProposition: row.value_proposition,
+    isActive: row.is_active,
+    createdAt: row.created_at,
+  };
+}
+
 app.get('/api/strategy/current', async (req, res) => {
   const pool = createPool();
   try {
-    const decoded = verifyToken(req);
-    if (!decoded) return res.status(401).json({ error: 'Não autenticado.' });
-    const member = (await pool.query('SELECT organization_id FROM organization_members WHERE user_id=$1 LIMIT 1', [decoded.userId])).rows[0];
-    if (!member) return res.json({ strategy: null });
-    const biz = (await pool.query('SELECT id FROM businesses WHERE organization_id=$1 LIMIT 1', [member.organization_id])).rows[0];
-    if (!biz) return res.json({ strategy: null });
-    const strat = (await pool.query('SELECT * FROM strategies WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [biz.id])).rows[0];
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const businessId = authorized.business.id;
+    const strat = (await pool.query('SELECT * FROM strategies WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [businessId])).rows[0];
     if (!strat) return res.json({ strategy: null });
-    const channels = (await pool.query('SELECT * FROM strategy_channels WHERE strategy_id=$1 ORDER BY priority', [strat.id])).rows;
-    const weeks = (await pool.query('SELECT * FROM strategy_plan_weeks WHERE strategy_id=$1 ORDER BY week', [strat.id])).rows;
-    const opps = (await pool.query('SELECT * FROM opportunities WHERE business_id=$1', [biz.id])).rows;
-    res.json({ strategy: { ...strat, channels, planWeeks: weeks, opportunities: opps } });
+    const [channelsResult, weeksResult, opportunitiesResult, goalResult] = await Promise.all([
+      pool.query('SELECT * FROM strategy_channels WHERE strategy_id=$1 ORDER BY priority', [strat.id]),
+      pool.query('SELECT * FROM strategy_plan_weeks WHERE strategy_id=$1 ORDER BY week', [strat.id]),
+      pool.query('SELECT * FROM opportunities WHERE business_id=$1 ORDER BY created_at DESC', [businessId]),
+      pool.query('SELECT * FROM goals WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [businessId]),
+    ]);
+    const goal = goalResult.rows[0];
+    res.json({
+      strategy: strategyForClient(strat),
+      channels: channelsResult.rows,
+      planWeeks: weeksResult.rows,
+      opportunities: opportunitiesResult.rows,
+      goal: goal ? {
+        ...goal,
+        businessId: goal.business_id,
+        goalType: goal.goal_type,
+        targetMetric: goal.target_metric,
+        createdAt: goal.created_at,
+      } : null,
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
   finally { pool.end().catch(() => {}); }
 });
 
+app.post('/api/strategy/regenerate', async (req, res) => {
+  const pool = createPool();
+  let client;
+  try {
+    // The frontend sends businessId in the body for this endpoint.
+    const requestedBusinessId = String(req.body?.businessId || '');
+    const decoded = verifyToken(req);
+    if (!decoded) return res.status(401).json({ error: 'Não autenticado.' });
+    const business = (await pool.query(
+      `SELECT b.* FROM businesses b
+       JOIN organization_members om ON om.organization_id=b.organization_id
+       WHERE b.id=$1 AND om.user_id=$2 LIMIT 1`,
+      [requestedBusinessId, decoded.userId]
+    )).rows[0];
+    if (!business) return res.status(403).json({ error: 'Acesso negado a esta empresa.' });
+
+    const [productsResult, audienceResult, marketingResult, goalsResult] = await Promise.all([
+      pool.query('SELECT * FROM products WHERE business_id=$1 ORDER BY created_at DESC', [business.id]),
+      pool.query('SELECT * FROM target_audiences WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [business.id]),
+      pool.query('SELECT * FROM marketing_profiles WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [business.id]),
+      pool.query('SELECT * FROM goals WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [business.id]),
+    ]);
+    const context = {
+      business: {
+        name: business.name,
+        segment: business.segment,
+        description: business.description,
+        city: business.city,
+        state: business.state,
+        serviceArea: business.service_area,
+        serviceType: business.service_type,
+      },
+      products: productsResult.rows,
+      audience: audienceResult.rows[0] || null,
+      currentMarketing: marketingResult.rows[0] || null,
+      goal: goalsResult.rows[0] || null,
+    };
+
+    let generated;
+    if (process.env.GEMINI_API_KEY) {
+      const { GoogleGenAI } = await import('@google/genai');
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const prompt = `Você é um gerente de marketing sênior. Crie uma estratégia de marketing prática em português do Brasil baseada somente nos dados reais abaixo. Quando faltar informação, apresente como hipótese, sem inventar fatos, preços ou resultados.
+
+DADOS:
+${JSON.stringify(context, null, 2)}
+
+Retorne somente JSON válido neste formato:
+{"business_summary":"...","ideal_customer":{"description":"...","main_pains":["..."],"main_desires":["..."],"main_objections":["..."]},"positioning":{"statement":"...","value_proposition":"...","differentiators":["..."]},"priority_channels":[{"channel":"...","priority":1,"reason":"..."}],"opportunities":[{"title":"...","description":"...","impact":"high"}],"plan_30_days":[{"week":1,"objective":"...","actions":["..."]},{"week":2,"objective":"...","actions":["..."]},{"week":3,"objective":"...","actions":["..."]},{"week":4,"objective":"...","actions":["..."]}]}`;
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+        config: { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 5000 },
+      });
+      generated = JSON.parse(response.text || '{}');
+    } else {
+      const audience = audienceResult.rows[0] || {};
+      const marketingChannels = Array.isArray(marketingResult.rows[0]?.channels) ? marketingResult.rows[0].channels : [];
+      const channels = marketingChannels.length ? marketingChannels.slice(0, 3) : ['Instagram', 'LinkedIn', 'WhatsApp'];
+      generated = {
+        business_summary: `${business.name} atua em ${business.segment || 'seu segmento'}, com foco em ${business.description || 'soluções para seus clientes'}.`,
+        ideal_customer: {
+          description: audience.profile || audience.description || 'Cliente com necessidade compatível com as soluções da empresa.',
+          main_pains: audience.pains || ['Necessidade de encontrar uma solução confiável'],
+          main_desires: audience.desires || ['Obter melhores resultados com segurança'],
+          main_objections: audience.objections || ['Dúvidas sobre valor e adequação da solução'],
+        },
+        positioning: {
+          statement: `${business.name}: soluções de ${business.segment || 'marketing e negócios'} orientadas às necessidades do cliente.`,
+          value_proposition: business.description || `Atendimento especializado em ${business.segment || 'soluções empresariais'}.`,
+          differentiators: productsResult.rows.map(product => product.main_benefit).filter(Boolean).slice(0, 3),
+        },
+        priority_channels: channels.map((channel, index) => ({ channel, priority: index + 1, reason: 'Canal alinhado ao perfil e ao momento atual da empresa.' })),
+        opportunities: [{ title: 'Fortalecer presença digital', description: 'Criar uma rotina consistente de conteúdo e acompanhamento de leads.', impact: 'high' }],
+        plan_30_days: [1, 2, 3, 4].map(week => ({ week, objective: `Executar a etapa ${week} da estratégia`, actions: [`Planejar as ações da semana ${week}`, 'Produzir conteúdo alinhado ao objetivo', 'Acompanhar leads e registrar resultados'] })),
+      };
+    }
+
+    if (!generated.business_summary || !generated.positioning || !Array.isArray(generated.plan_30_days)) {
+      throw new Error('A IA retornou uma estratégia incompleta. Tente novamente.');
+    }
+
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await client.query('UPDATE strategies SET is_active=false WHERE business_id=$1', [business.id]);
+    const strategy = (await client.query(
+      `INSERT INTO strategies
+        (business_id, business_summary, ideal_customer_desc, ideal_customer_pains, ideal_customer_desires,
+         ideal_customer_objections, positioning_statement, value_proposition, differentiators, is_active)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true) RETURNING *`,
+      [
+        business.id, generated.business_summary, generated.ideal_customer?.description || null,
+        JSON.stringify(generated.ideal_customer?.main_pains || []), JSON.stringify(generated.ideal_customer?.main_desires || []),
+        JSON.stringify(generated.ideal_customer?.main_objections || []), generated.positioning.statement || null,
+        generated.positioning.value_proposition || null, JSON.stringify(generated.positioning.differentiators || []),
+      ]
+    )).rows[0];
+    for (const [index, channel] of (generated.priority_channels || []).slice(0, 5).entries()) {
+      await client.query(
+        'INSERT INTO strategy_channels (strategy_id, channel, priority, reason) VALUES ($1,$2,$3,$4)',
+        [strategy.id, channel.channel, Number(channel.priority || index + 1), channel.reason || null]
+      );
+    }
+    for (const [index, week] of generated.plan_30_days.slice(0, 4).entries()) {
+      await client.query(
+        'INSERT INTO strategy_plan_weeks (strategy_id, week, objective, actions) VALUES ($1,$2,$3,$4)',
+        [strategy.id, Number(week.week || index + 1), week.objective || null, JSON.stringify(week.actions || [])]
+      );
+    }
+    await client.query('DELETE FROM opportunities WHERE business_id=$1', [business.id]);
+    for (const opportunity of (generated.opportunities || []).slice(0, 10)) {
+      await client.query(
+        `INSERT INTO opportunities (business_id, title, description, impact, effort, status)
+         VALUES ($1,$2,$3,$4,'medium','open')`,
+        [business.id, opportunity.title || 'Oportunidade', opportunity.description || null, ['high', 'medium', 'low'].includes(opportunity.impact) ? opportunity.impact : 'medium']
+      );
+    }
+    await client.query(
+      `INSERT INTO ai_generations (organization_id, business_id, type, provider, model, output)
+       VALUES ($1,$2,'initial_strategy',$3,$4,$5)`,
+      [business.organization_id, business.id, process.env.GEMINI_API_KEY ? 'gemini' : 'fallback', process.env.GEMINI_API_KEY ? 'gemini-2.5-flash' : 'deterministic', JSON.stringify(generated)]
+    );
+    await client.query('COMMIT');
+    res.json({ success: true, strategy: strategyForClient(strategy) });
+  } catch (e) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    console.error('[strategy-regenerate]', e.message);
+    res.status(500).json({ error: e.message || 'Não foi possível gerar a estratégia.' });
+  } finally {
+    client?.release();
+    pool.end().catch(() => {});
+  }
+});
+
 // ─── Content ──────────────────────────────────────────────────────────────────
+function contentForClient(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    organizationId: row.organization_id,
+    businessId: row.business_id,
+    strategyId: row.strategy_id,
+    funnelStage: row.funnel_stage,
+    scheduledDate: row.scheduled_date,
+    visualDirection: row.visual_direction,
+    videoScript: row.video_script,
+    generationContext: row.generation_context,
+    campaignId: row.campaign_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    publishedAt: row.published_at,
+  };
+}
+
+async function contentBusiness(pool, req, businessId) {
+  const decoded = verifyToken(req);
+  if (!decoded) return { error: 401, message: 'Não autenticado.' };
+  if (!businessId) return { error: 400, message: 'Empresa não informada.' };
+  const business = (await pool.query(
+    `SELECT b.* FROM businesses b
+     JOIN organization_members om ON om.organization_id=b.organization_id
+     WHERE b.id=$1 AND om.user_id=$2 LIMIT 1`,
+    [businessId, decoded.userId]
+  )).rows[0];
+  if (!business) return { error: 403, message: 'Acesso negado a esta empresa.' };
+  return { business };
+}
+
 app.get('/api/content', async (req, res) => {
   const pool = createPool();
   try {
@@ -228,12 +425,242 @@ app.get('/api/content', async (req, res) => {
     if (!member) return res.json([]);
     const biz = (await pool.query('SELECT id FROM businesses WHERE organization_id=$1 LIMIT 1', [member.organization_id])).rows[0];
     if (!biz) return res.json([]);
-    res.json((await pool.query('SELECT * FROM content_items WHERE business_id=$1 ORDER BY created_at DESC', [biz.id])).rows);
+    const rows = (await pool.query('SELECT * FROM content_items WHERE business_id=$1 ORDER BY scheduled_date DESC NULLS LAST, created_at DESC', [biz.id])).rows;
+    res.json(rows.map(contentForClient));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/content/generate-calendar', async (req, res) => {
+  const pool = createPool();
+  let client;
+  try {
+    const { businessId, frequencyDesc, objective } = req.body || {};
+    const periodDays = Number(req.body?.periodDays || 30);
+    const channels = Array.isArray(req.body?.channels)
+      ? req.body.channels.map(channel => String(channel).trim()).filter(Boolean).slice(0, 10)
+      : [];
+    const authorized = await contentBusiness(pool, req, businessId);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    if (![7, 14, 30].includes(periodDays)) return res.status(400).json({ error: 'Período inválido.' });
+    if (!channels.length) return res.status(400).json({ error: 'Selecione pelo menos um canal.' });
+
+    const business = authorized.business;
+    const [strategyResult, productsResult, audienceResult] = await Promise.all([
+      pool.query('SELECT * FROM strategies WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [businessId]),
+      pool.query('SELECT name, type, description, main_benefit, ideal_customer FROM products WHERE business_id=$1 ORDER BY created_at DESC LIMIT 10', [businessId]),
+      pool.query('SELECT description, profile, pains, desires, objections FROM target_audiences WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [businessId]),
+    ]);
+    const strategy = strategyResult.rows[0] || null;
+    const context = {
+      business: {
+        name: business.name,
+        segment: business.segment,
+        description: business.description,
+        serviceArea: business.service_area,
+      },
+      strategy,
+      products: productsResult.rows,
+      audience: audienceResult.rows[0] || null,
+    };
+
+    const frequencyMatch = String(frequencyDesc || '').match(/(\d+)/);
+    const postsPerWeek = /todos os dias/i.test(String(frequencyDesc)) ? 7 : Number(frequencyMatch?.[1] || 3);
+    const desiredCount = Math.min(30, Math.max(1, Math.ceil((periodDays / 7) * postsPerWeek)));
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const lastDate = new Date(today);
+    lastDate.setDate(lastDate.getDate() + periodDays - 1);
+
+    let items = [];
+    let aiOutput = null;
+    if (process.env.GEMINI_API_KEY) {
+      const { GoogleGenAI } = await import('@google/genai');
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const prompt = `Você é um estrategista de conteúdo sênior. Crie um calendário editorial em português do Brasil.
+
+Configuração:
+- Início: ${today.toISOString().slice(0, 10)}
+- Período: ${periodDays} dias
+- Quantidade exata: ${desiredCount} conteúdos
+- Frequência: ${frequencyDesc}
+- Canais permitidos: ${channels.join(', ')}
+- Objetivo: ${objective || 'autoridade'}
+
+Contexto real da empresa:
+${JSON.stringify(context, null, 2)}
+
+Regras:
+- Não invente preços, garantias, clientes, depoimentos ou resultados.
+- Distribua as datas dentro do período e varie canais e formatos.
+- Use somente funnel_stage: awareness, consideration, conversion ou retention.
+- Retorne somente JSON válido neste formato:
+{"content_items":[{"scheduled_date":"YYYY-MM-DD","title":"...","topic":"...","channel":"...","format":"...","funnel_stage":"awareness","objective":"...","brief":"..."}]}`;
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+        config: { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 5000 },
+      });
+      aiOutput = JSON.parse(response.text || '{}');
+      items = Array.isArray(aiOutput.content_items) ? aiOutput.content_items : [];
+    } else {
+      const subjects = productsResult.rows.length
+        ? productsResult.rows.map(product => product.name)
+        : [business.segment || business.name || 'seu mercado'];
+      const formats = ['Carrossel', 'Post', 'Vídeo curto', 'Stories'];
+      items = Array.from({ length: desiredCount }, (_, index) => {
+        const offset = desiredCount === 1 ? 0 : Math.round((index * (periodDays - 1)) / (desiredCount - 1));
+        const date = new Date(today);
+        date.setDate(date.getDate() + offset);
+        const subject = subjects[index % subjects.length];
+        return {
+          scheduled_date: date.toISOString().slice(0, 10),
+          title: `${index + 1}. Como ${subject} pode ajudar o cliente ideal`,
+          topic: `Conteúdo educativo sobre ${subject}, conectado ao objetivo de ${objective || 'autoridade'}.`,
+          channel: channels[index % channels.length],
+          format: formats[index % formats.length],
+          funnel_stage: index % 4 === 3 ? 'conversion' : index % 3 === 2 ? 'consideration' : 'awareness',
+          objective: objective || 'autoridade',
+        };
+      });
+      aiOutput = { content_items: items, fallback: true };
+    }
+
+    const allowedStages = new Set(['awareness', 'consideration', 'conversion', 'retention']);
+    const allowedChannels = new Set(channels.map(channel => channel.toLowerCase()));
+    items = items.slice(0, desiredCount).map((item, index) => {
+      const parsedDate = new Date(`${item.scheduled_date}T00:00:00`);
+      const fallbackDate = new Date(today);
+      fallbackDate.setDate(fallbackDate.getDate() + Math.min(periodDays - 1, index));
+      const validDate = !Number.isNaN(parsedDate.getTime()) && parsedDate >= today && parsedDate <= lastDate ? parsedDate : fallbackDate;
+      const requestedChannel = String(item.channel || channels[index % channels.length]);
+      const channel = allowedChannels.has(requestedChannel.toLowerCase()) ? requestedChannel : channels[index % channels.length];
+      return {
+        scheduledDate: validDate.toISOString().slice(0, 10),
+        title: String(item.title || item.topic || 'Ideia de conteúdo').slice(0, 300),
+        topic: String(item.topic || item.brief || '').slice(0, 2000),
+        channel,
+        format: String(item.format || 'Post').slice(0, 100),
+        funnelStage: allowedStages.has(item.funnel_stage) ? item.funnel_stage : 'awareness',
+        itemObjective: String(item.objective || objective || '').slice(0, 300),
+      };
+    });
+    if (!items.length) throw new Error('A IA não retornou itens válidos para o calendário.');
+
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const saved = [];
+    for (const item of items) {
+      const result = await client.query(
+        `INSERT INTO content_items
+          (organization_id, business_id, strategy_id, title, topic, channel, format, funnel_stage, objective, scheduled_date, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'idea') RETURNING *`,
+        [business.organization_id, businessId, strategy?.id || null, item.title, item.topic, item.channel, item.format, item.funnelStage, item.itemObjective, item.scheduledDate]
+      );
+      saved.push(contentForClient(result.rows[0]));
+    }
+    await client.query(
+      `INSERT INTO ai_generations (organization_id, business_id, type, provider, model, output)
+       VALUES ($1,$2,'content_calendar',$3,$4,$5)`,
+      [business.organization_id, businessId, process.env.GEMINI_API_KEY ? 'gemini' : 'fallback', process.env.GEMINI_API_KEY ? 'gemini-2.5-flash' : 'deterministic', JSON.stringify(aiOutput)]
+    );
+    await client.query('COMMIT');
+    res.json({ success: true, items: saved });
+  } catch (e) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    console.error('[content-calendar]', e.message);
+    res.status(500).json({ error: e.message || 'Não foi possível gerar o calendário.' });
+  } finally {
+    client?.release();
+    pool.end().catch(() => {});
+  }
+});
+
+app.post('/api/content', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await contentBusiness(pool, req, req.body?.businessId);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const business = authorized.business;
+    const strategy = (await pool.query('SELECT id FROM strategies WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [business.id])).rows[0];
+    const row = (await pool.query(
+      `INSERT INTO content_items (organization_id, business_id, strategy_id, title, topic, channel, format, funnel_stage, objective, scheduled_date, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [business.organization_id, business.id, strategy?.id || null, req.body.title || 'Novo Conteúdo', req.body.topic || null, req.body.channel || null, req.body.format || null, req.body.funnelStage || null, req.body.objective || null, req.body.scheduledDate || null, req.body.status || 'idea']
+    )).rows[0];
+    res.json(contentForClient(row));
   } catch (e) { res.status(500).json({ error: e.message }); }
   finally { pool.end().catch(() => {}); }
 });
 
 // ─── Campaigns ────────────────────────────────────────────────────────────────
+app.get('/api/businesses/:id/context', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await contentBusiness(pool, req, req.params.id);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const businessId = authorized.business.id;
+    const [products, audiences, profiles] = await Promise.all([
+      pool.query('SELECT * FROM products WHERE business_id=$1 ORDER BY created_at DESC', [businessId]),
+      pool.query('SELECT * FROM target_audiences WHERE business_id=$1 ORDER BY created_at DESC', [businessId]),
+      pool.query('SELECT * FROM marketing_profiles WHERE business_id=$1 ORDER BY created_at DESC', [businessId]),
+    ]);
+    res.json({
+      products: products.rows.map(product => ({
+        ...product,
+        businessId: product.business_id,
+        ticketValue: product.ticket_value,
+        mainBenefit: product.main_benefit,
+        idealCustomer: product.ideal_customer,
+        isMain: product.is_main,
+      })),
+      targetAudiences: audiences.rows.map(audience => ({
+        ...audience,
+        businessId: audience.business_id,
+        ageRange: audience.age_range,
+        decisionFactors: audience.decision_factors,
+      })),
+      marketingProfiles: profiles.rows.map(profile => ({
+        ...profile,
+        businessId: profile.business_id,
+        postFrequency: profile.post_frequency,
+        monthlyInvestment: profile.monthly_investment,
+        monthlyLeads: profile.monthly_leads,
+        monthlySales: profile.monthly_sales,
+        mainDifficulty: profile.main_difficulty,
+      })),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+function campaignForClient(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    organizationId: row.organization_id,
+    businessId: row.business_id,
+    strategyId: row.strategy_id,
+    productId: row.product_id,
+    targetAudience: row.target_audience,
+    mainArgument: row.main_argument,
+    startDate: row.start_date,
+    endDate: row.end_date,
+    primaryMetric: row.primary_metric,
+    investmentSpent: Number(row.investment_spent || 0),
+    revenueGenerated: Number(row.revenue_generated || 0),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    impressions: Number(row.impressions || 0),
+    clicks: Number(row.clicks || 0),
+    leads: Number(row.leads || 0),
+    sales: Number(row.sales || 0),
+    channels: Array.isArray(row.channels) ? row.channels : [],
+    assets: Array.isArray(row.assets) ? row.assets : [],
+    tasks: Array.isArray(row.tasks) ? row.tasks : [],
+  };
+}
+
 app.get('/api/campaigns', async (req, res) => {
   const pool = createPool();
   try {
@@ -243,7 +670,193 @@ app.get('/api/campaigns', async (req, res) => {
     if (!member) return res.json([]);
     const biz = (await pool.query('SELECT id FROM businesses WHERE organization_id=$1 LIMIT 1', [member.organization_id])).rows[0];
     if (!biz) return res.json([]);
-    res.json((await pool.query('SELECT * FROM campaigns WHERE business_id=$1 ORDER BY created_at DESC', [biz.id])).rows);
+    const rows = (await pool.query(
+      `SELECT c.*,
+              COALESCE(json_agg(cc.*) FILTER (WHERE cc.id IS NOT NULL), '[]') AS channels
+       FROM campaigns c
+       LEFT JOIN campaign_channels cc ON cc.campaign_id=c.id
+       WHERE c.business_id=$1
+       GROUP BY c.id
+       ORDER BY c.created_at DESC`,
+      [biz.id]
+    )).rows;
+    res.json(rows.map(campaignForClient));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/campaigns/generate', async (req, res) => {
+  const pool = createPool();
+  let client;
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const businessId = authorized.business.id;
+    const setup = req.body || {};
+    const objective = String(setup.objective || '').trim();
+    const channels = Array.isArray(setup.channels)
+      ? setup.channels.map(channel => String(channel).trim()).filter(Boolean).slice(0, 10)
+      : [];
+    if (!objective) return res.status(400).json({ error: 'Selecione o objetivo da campanha.' });
+    if (!channels.length) return res.status(400).json({ error: 'Selecione pelo menos um canal.' });
+
+    const [businessResult, productsResult, audienceResult, strategyResult] = await Promise.all([
+      pool.query('SELECT * FROM businesses WHERE id=$1', [businessId]),
+      pool.query('SELECT * FROM products WHERE business_id=$1 ORDER BY created_at DESC', [businessId]),
+      pool.query('SELECT * FROM target_audiences WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [businessId]),
+      pool.query('SELECT * FROM strategies WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [businessId]),
+    ]);
+    const business = businessResult.rows[0];
+    const selectedProduct = setup.productId
+      ? productsResult.rows.find(product => product.id === setup.productId) || null
+      : null;
+    const context = {
+      business: {
+        name: business.name,
+        segment: business.segment,
+        description: business.description,
+        city: business.city,
+        state: business.state,
+      },
+      product: selectedProduct,
+      audience: setup.customAudience || audienceResult.rows[0] || null,
+      strategy: strategyResult.rows[0] || null,
+    };
+
+    let result;
+    if (process.env.GEMINI_API_KEY) {
+      const { GoogleGenAI } = await import('@google/genai');
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const prompt = `Você é um estrategista de campanhas sênior. Crie uma campanha prática em português do Brasil.
+
+Configuração:
+- Nome sugerido pelo usuário: ${setup.name || 'não informado'}
+- Objetivo: ${objective}
+- Canais: ${channels.join(', ')}
+- Período: ${setup.startDate || 'não informado'} até ${setup.endDate || 'não informado'}
+- Orçamento: ${setup.budget || 'não informado'}
+- Meta: ${setup.targetMetric || 'não informada'}
+- Instruções: ${setup.instructions || 'nenhuma'}
+
+Contexto real:
+${JSON.stringify(context, null, 2)}
+
+Não invente preços, descontos, depoimentos, garantias ou resultados. Se não houver produto selecionado, faça uma campanha institucional.
+Retorne somente JSON válido:
+{"campaign_name":"...","campaign_summary":"...","target_audience":{"description":"...","main_pain":"...","main_desire":"...","main_objection":"..."},"offer":{"description":"...","value_proposition":"...","urgency":"..."},"main_argument":"...","messaging":{"main_message":"...","supporting_arguments":["..."]},"plan_actions":["..."]}`;
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+        config: { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 3000 },
+      });
+      result = JSON.parse(response.text || '{}');
+    } else {
+      const focus = selectedProduct?.name || business.segment || business.name;
+      result = {
+        campaign_name: setup.name || `Campanha de ${objective}`,
+        campaign_summary: `Campanha focada em ${objective} para apresentar ${focus} ao público-alvo da empresa.`,
+        target_audience: setup.customAudience || audienceResult.rows[0] || { description: 'Público-alvo cadastrado pela empresa' },
+        offer: {
+          description: `Apresentação da proposta de valor de ${focus}.`,
+          value_proposition: selectedProduct?.main_benefit || strategyResult.rows[0]?.value_proposition || business.description,
+          urgency: 'Incentivar o contato para conhecer a solução.',
+        },
+        main_argument: selectedProduct?.main_benefit || `Solução alinhada às necessidades do público de ${business.segment || business.name}.`,
+        messaging: {
+          main_message: `Conheça como ${focus} pode apoiar seus objetivos.`,
+          supporting_arguments: ['Atendimento alinhado à necessidade do cliente', 'Solução apresentada de forma clara e consultiva'],
+        },
+        plan_actions: channels.map(channel => `Preparar e revisar a comunicação para ${channel}`),
+      };
+    }
+
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const campaign = (await client.query(
+      `INSERT INTO campaigns
+        (organization_id, business_id, strategy_id, product_id, name, objective, description, target_audience, offer, main_argument, messaging, budget, start_date, end_date, primary_metric, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'draft') RETURNING *`,
+      [
+        business.organization_id, businessId, strategyResult.rows[0]?.id || null, selectedProduct?.id || null,
+        String(result.campaign_name || setup.name || 'Nova Campanha').slice(0, 300), objective,
+        result.campaign_summary || null, JSON.stringify(result.target_audience || {}), JSON.stringify(result.offer || {}),
+        result.main_argument || null, JSON.stringify(result.messaging || {}), setup.budget || null,
+        setup.startDate || null, setup.endDate || null, setup.targetMetric || null,
+      ]
+    )).rows[0];
+
+    const savedChannels = [];
+    for (const channel of channels) {
+      const saved = (await client.query(
+        'INSERT INTO campaign_channels (campaign_id, channel, status) VALUES ($1,$2,$3) RETURNING *',
+        [campaign.id, channel, 'planned']
+      )).rows[0];
+      savedChannels.push(saved);
+    }
+    const savedTasks = [];
+    const actions = Array.isArray(result.plan_actions) ? result.plan_actions.slice(0, 20) : [];
+    for (const action of actions) {
+      const saved = (await client.query(
+        "INSERT INTO campaign_tasks (campaign_id, title, status) VALUES ($1,$2,'todo') RETURNING *",
+        [campaign.id, String(action).slice(0, 500)]
+      )).rows[0];
+      savedTasks.push(saved);
+    }
+    await client.query(
+      `INSERT INTO ai_generations (organization_id, business_id, type, provider, model, output)
+       VALUES ($1,$2,'campaign_generation',$3,$4,$5)`,
+      [business.organization_id, businessId, process.env.GEMINI_API_KEY ? 'gemini' : 'fallback', process.env.GEMINI_API_KEY ? 'gemini-2.5-flash' : 'deterministic', JSON.stringify(result)]
+    );
+    await client.query('COMMIT');
+    res.json(campaignForClient({ ...campaign, channels: savedChannels, tasks: savedTasks, assets: [] }));
+  } catch (e) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    console.error('[campaign-generate]', e.message);
+    res.status(500).json({ error: e.message || 'Não foi possível gerar a campanha.' });
+  } finally {
+    client?.release();
+    pool.end().catch(() => {});
+  }
+});
+
+app.get('/api/campaigns/:id', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const campaign = (await pool.query('SELECT * FROM campaigns WHERE id=$1 AND business_id=$2', [req.params.id, authorized.business.id])).rows[0];
+    if (!campaign) return res.status(404).json({ error: 'Campanha não encontrada.' });
+    const [channels, assets, tasks, product] = await Promise.all([
+      pool.query('SELECT * FROM campaign_channels WHERE campaign_id=$1 ORDER BY id', [campaign.id]),
+      pool.query('SELECT * FROM campaign_assets WHERE campaign_id=$1 ORDER BY created_at DESC', [campaign.id]),
+      pool.query('SELECT * FROM campaign_tasks WHERE campaign_id=$1 ORDER BY id', [campaign.id]),
+      campaign.product_id ? pool.query('SELECT * FROM products WHERE id=$1', [campaign.product_id]) : Promise.resolve({ rows: [] }),
+    ]);
+    res.json(campaignForClient({ ...campaign, channels: channels.rows, assets: assets.rows, tasks: tasks.rows, product: product.rows[0] || null }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+app.put('/api/campaigns/:id', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const current = (await pool.query('SELECT * FROM campaigns WHERE id=$1 AND business_id=$2', [req.params.id, authorized.business.id])).rows[0];
+    if (!current) return res.status(404).json({ error: 'Campanha não encontrada.' });
+    const body = req.body || {};
+    const updated = (await pool.query(
+      `UPDATE campaigns SET status=$1, impressions=$2, clicks=$3, leads=$4, sales=$5,
+       investment_spent=$6, revenue_generated=$7, updated_at=NOW() WHERE id=$8 RETURNING *`,
+      [
+        body.status ?? current.status,
+        Number(body.impressions ?? current.impressions ?? 0), Number(body.clicks ?? current.clicks ?? 0),
+        Number(body.leads ?? current.leads ?? 0), Number(body.sales ?? current.sales ?? 0),
+        Number(body.investmentSpent ?? current.investment_spent ?? 0), Number(body.revenueGenerated ?? current.revenue_generated ?? 0),
+        current.id,
+      ]
+    )).rows[0];
+    res.json(campaignForClient(updated));
   } catch (e) { res.status(500).json({ error: e.message }); }
   finally { pool.end().catch(() => {}); }
 });
@@ -259,6 +872,328 @@ app.get('/api/leads', async (req, res) => {
     const biz = (await pool.query('SELECT id FROM businesses WHERE organization_id=$1 LIMIT 1', [member.organization_id])).rows[0];
     if (!biz) return res.json([]);
     res.json((await pool.query('SELECT * FROM leads WHERE business_id=$1 ORDER BY created_at DESC', [biz.id])).rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+// ─── B2B Prospecting ─────────────────────────────────────────────────────────
+function prospectingSearchForClient(row) {
+  return {
+    ...row,
+    organizationId: row.organization_id,
+    businessId: row.business_id,
+    userId: row.user_id,
+    radiusKm: row.radius_km,
+    requestedLimit: Number(row.requested_limit || 0),
+    totalFound: Number(row.total_found || 0),
+    totalWithEmail: Number(row.total_with_email || 0),
+    totalWithPhone: Number(row.total_with_phone || 0),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at,
+  };
+}
+
+function prospectForClient(row) {
+  return {
+    ...row,
+    organizationId: row.organization_id,
+    businessId: row.business_id,
+    searchId: row.search_id,
+    companyName: row.company_name,
+    legalName: row.legal_name,
+    emailType: row.email_type,
+    websiteStatus: row.website_status,
+    sourceUrl: row.source_url,
+    contactSource: row.contact_source,
+    qualificationScore: row.qualification_score == null ? null : Number(row.qualification_score),
+    qualificationReason: row.qualification_reason,
+    qualificationFit: row.qualification_fit,
+    possibleNeed: row.possible_need,
+    crmLeadId: row.crm_lead_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function normalizeProspectingText(value) {
+  return String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+}
+
+async function discoverProspectingCompanies(params) {
+  const query = [params.segment, params.keywords, params.city, params.state, params.country].filter(Boolean).join(' ');
+  const limit = Math.min(50, Math.max(1, Number(params.limit || 25)));
+  let companies = [];
+
+  if (process.env.GEOAPIFY_API_KEY) {
+    const url = new URL('https://api.geoapify.com/v1/geocode/search');
+    url.searchParams.set('text', query);
+    url.searchParams.set('limit', String(limit));
+    url.searchParams.set('format', 'geojson');
+    url.searchParams.set('apiKey', process.env.GEOAPIFY_API_KEY);
+    const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!response.ok) throw new Error(`O provedor Geoapify respondeu com status ${response.status}.`);
+    const data = await response.json();
+    companies = (Array.isArray(data.features) ? data.features : []).map(feature => {
+      const p = feature.properties || {};
+      return {
+        companyName: p.name || p.company || p.legal_name,
+        legalName: p.legal_name || null,
+        segment: params.segment,
+        description: p.formatted || [p.address_line1, p.address_line2].filter(Boolean).join(', '),
+        city: p.city || p.municipality || p.county || params.city || null,
+        state: p.state || p.state_code || params.state || null,
+        country: p.country || params.country || 'Brasil',
+        website: p.website || p.contact?.website || p.url || null,
+        phone: p.phone || p.contact?.phone || p.contact?.mobile || null,
+        email: p.email || p.contact?.email || null,
+        sourceUrl: p.website || p.contact?.website || null,
+        contactSource: 'Geoapify',
+        resultType: p.result_type || p.place_type || null,
+      };
+    });
+  }
+
+  if (!companies.length && process.env.GOOGLE_PLACES_API_KEY) {
+    const url = new URL('https://maps.googleapis.com/maps/api/place/textsearch/json');
+    url.searchParams.set('query', query);
+    url.searchParams.set('key', process.env.GOOGLE_PLACES_API_KEY);
+    const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!response.ok) throw new Error(`O provedor Google Places respondeu com status ${response.status}.`);
+    const data = await response.json();
+    const places = (Array.isArray(data.results) ? data.results : []).slice(0, limit);
+    companies = await Promise.all(places.map(async place => {
+      let details = {};
+      if (place.place_id) {
+        try {
+          const detailsUrl = new URL('https://maps.googleapis.com/maps/api/place/details/json');
+          detailsUrl.searchParams.set('place_id', place.place_id);
+          detailsUrl.searchParams.set('fields', 'name,website,formatted_phone_number,international_phone_number');
+          detailsUrl.searchParams.set('key', process.env.GOOGLE_PLACES_API_KEY);
+          const detailsResponse = await fetch(detailsUrl, { signal: AbortSignal.timeout(8000) });
+          if (detailsResponse.ok) details = (await detailsResponse.json()).result || {};
+        } catch { /* Keep the public text-search result when details time out. */ }
+      }
+      return {
+        companyName: details.name || place.name,
+        legalName: null,
+        segment: params.segment,
+        description: place.formatted_address || place.vicinity || null,
+        city: params.city || null,
+        state: params.state || null,
+        country: params.country || 'Brasil',
+        website: details.website || null,
+        phone: details.formatted_phone_number || details.international_phone_number || null,
+        email: null,
+        sourceUrl: details.website || null,
+        contactSource: 'Google Places',
+      };
+    }));
+  }
+
+  if (!process.env.GEOAPIFY_API_KEY && !process.env.GOOGLE_PLACES_API_KEY) {
+    throw new Error('Configure GEOAPIFY_API_KEY ou GOOGLE_PLACES_API_KEY para realizar buscas reais.');
+  }
+
+  const invalidNames = new Set([
+    normalizeProspectingText(params.city), normalizeProspectingText(params.state),
+    normalizeProspectingText(params.country), 'brasil', 'brazil',
+  ].filter(Boolean));
+  const seen = new Set();
+  return companies.filter(company => {
+    const name = String(company.companyName || '').trim();
+    if (['city', 'county', 'state', 'country', 'postcode', 'street'].includes(String(company.resultType || '').toLowerCase())) return false;
+    if (name.length < 2 || invalidNames.has(normalizeProspectingText(name))) return false;
+    const signature = `${normalizeProspectingText(name)}:${normalizeProspectingText(company.city)}`;
+    if (seen.has(signature)) return false;
+    seen.add(signature);
+    return true;
+  }).slice(0, limit);
+}
+
+app.post('/api/prospecting/search', async (req, res) => {
+  const pool = createPool();
+  let searchRecord;
+  let client;
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const decoded = verifyToken(req);
+    const segment = String(req.body?.segment || '').trim();
+    if (!segment) return res.status(400).json({ error: 'Segmento é obrigatório para realizar a busca.' });
+    const requestedLimit = Math.min(50, Math.max(1, Number(req.body?.requestedLimit || 25)));
+    const params = {
+      segment,
+      city: String(req.body?.city || '').trim(),
+      state: String(req.body?.state || '').trim(),
+      country: String(req.body?.country || 'Brasil').trim() || 'Brasil',
+      keywords: String(req.body?.keywords || '').trim(),
+      radiusKm: req.body?.radiusKm ? Number(req.body.radiusKm) : null,
+      limit: requestedLimit,
+    };
+    searchRecord = (await pool.query(
+      `INSERT INTO prospecting_searches
+        (organization_id, business_id, user_id, segment, city, state, country, radius_km, keywords, requested_limit, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'running') RETURNING *`,
+      [authorized.business.organization_id, authorized.business.id, decoded.userId, segment, params.city || null, params.state || null, params.country, params.radiusKm, params.keywords || null, requestedLimit]
+    )).rows[0];
+
+    const discovered = await discoverProspectingCompanies(params);
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const saved = [];
+    for (const company of discovered) {
+      const contactPoints = [company.email, company.phone, company.website].filter(Boolean).length;
+      const score = Math.min(100, 35 + contactPoints * 15 + (company.description ? 10 : 0));
+      const fit = score >= 75 ? 'high' : score >= 50 ? 'medium' : 'low';
+      let domain = null;
+      try { domain = company.website ? new URL(company.website).hostname.replace(/^www\./, '') : null; } catch { /* Invalid public URL */ }
+      const row = (await client.query(
+        `INSERT INTO prospects
+          (organization_id, business_id, search_id, company_name, legal_name, segment, description, city, state, country,
+           website, domain, phone, email, email_type, website_status, source_url, contact_source, confidence,
+           qualification_score, qualification_reason, qualification_fit, possible_need, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) RETURNING *`,
+        [
+          authorized.business.organization_id, authorized.business.id, searchRecord.id, company.companyName, company.legalName,
+          segment, company.description, company.city, company.state, company.country, company.website, domain, company.phone,
+          company.email, company.email ? 'general' : null, company.website ? (company.email || company.phone ? 'contact_found' : 'website_found_no_contact') : 'no_website_found',
+          company.sourceUrl, company.contactSource, contactPoints >= 2 ? 'high' : 'medium', score,
+          `Pontuação baseada na completude dos dados públicos encontrados (${contactPoints} meios de contato).`, fit,
+          `Possível interesse em soluções relacionadas a ${authorized.business.segment || authorized.business.name}.`, fit === 'high' ? 'qualified' : 'new',
+        ]
+      )).rows[0];
+      saved.push(row);
+    }
+    const totalWithEmail = saved.filter(item => item.email).length;
+    const totalWithPhone = saved.filter(item => item.phone).length;
+    await client.query(
+      `UPDATE prospecting_searches SET status='completed', total_found=$1, total_with_email=$2,
+       total_with_phone=$3, completed_at=NOW(), updated_at=NOW() WHERE id=$4`,
+      [saved.length, totalWithEmail, totalWithPhone, searchRecord.id]
+    );
+    await client.query('COMMIT');
+    res.json({ searchId: searchRecord.id, totalFound: saved.length, totalWithEmail, totalWithPhone });
+  } catch (e) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    if (searchRecord?.id) await pool.query("UPDATE prospecting_searches SET status='failed', updated_at=NOW() WHERE id=$1", [searchRecord.id]).catch(() => {});
+    console.error('[prospecting-search]', e.message);
+    res.status(e.name === 'TimeoutError' ? 504 : 500).json({ error: e.message || 'Falha ao executar busca de prospecção.' });
+  } finally {
+    client?.release();
+    pool.end().catch(() => {});
+  }
+});
+
+app.get('/api/prospecting/searches', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const rows = (await pool.query('SELECT * FROM prospecting_searches WHERE business_id=$1 ORDER BY created_at DESC', [authorized.business.id])).rows;
+    res.json({ searches: rows.map(prospectingSearchForClient) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+app.get('/api/prospecting/searches/:searchId', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const search = (await pool.query('SELECT * FROM prospecting_searches WHERE id=$1 AND business_id=$2', [req.params.searchId, authorized.business.id])).rows[0];
+    if (!search) return res.status(404).json({ error: 'Busca de prospecção não encontrada.' });
+    const prospects = (await pool.query('SELECT * FROM prospects WHERE search_id=$1 AND business_id=$2 ORDER BY qualification_score DESC NULLS LAST, created_at DESC', [search.id, authorized.business.id])).rows;
+    res.json({ search: prospectingSearchForClient(search), prospects: prospects.map(prospectForClient) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+app.get('/api/prospecting/prospects', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const conditions = ['business_id=$1'];
+    const values = [authorized.business.id];
+    const add = (condition, value) => { values.push(value); conditions.push(condition.replace('?', `$${values.length}`)); };
+    if (req.query.hasEmail === 'true') conditions.push("email IS NOT NULL AND email<>''");
+    if (req.query.hasPhone === 'true') conditions.push("phone IS NOT NULL AND phone<>''");
+    if (req.query.hasWebsite === 'true') conditions.push("website IS NOT NULL AND website<>''");
+    if (req.query.status) add('status=?', String(req.query.status));
+    if (req.query.fit) add('qualification_fit=?', String(req.query.fit));
+    if (req.query.search) add("(company_name ILIKE ? OR city ILIKE ? OR email ILIKE ? OR website ILIKE ?)", `%${String(req.query.search).trim()}%`);
+    // Expand the single search placeholder safely for all four searchable columns.
+    if (req.query.search) {
+      const searchValue = values.pop();
+      conditions.pop();
+      const placeholders = [];
+      for (let i = 0; i < 4; i++) { values.push(searchValue); placeholders.push(`$${values.length}`); }
+      conditions.push(`(company_name ILIKE ${placeholders[0]} OR city ILIKE ${placeholders[1]} OR email ILIKE ${placeholders[2]} OR website ILIKE ${placeholders[3]})`);
+    }
+    const rows = (await pool.query(`SELECT * FROM prospects WHERE ${conditions.join(' AND ')} ORDER BY qualification_score DESC NULLS LAST, created_at DESC`, values)).rows;
+    res.json({ prospects: rows.map(prospectForClient) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/prospecting/prospects/import', async (req, res) => {
+  const pool = createPool();
+  let client;
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const ids = Array.isArray(req.body?.prospectIds) ? req.body.prospectIds.slice(0, 250) : [];
+    if (!ids.length) return res.status(400).json({ error: 'Nenhum prospect selecionado para importação.' });
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const prospects = (await client.query('SELECT * FROM prospects WHERE business_id=$1 AND id=ANY($2::uuid[]) FOR UPDATE', [authorized.business.id, ids])).rows;
+    let importedCount = 0;
+    for (const prospect of prospects) {
+      if (prospect.crm_lead_id) continue;
+      const lead = (await client.query(
+        `INSERT INTO leads (organization_id, business_id, name, company_name, email, phone, source, status, notes)
+         VALUES ($1,$2,$3,$4,$5,$6,'Prospecção','new',$7) RETURNING id`,
+        [authorized.business.organization_id, authorized.business.id, prospect.company_name, prospect.company_name, prospect.email, prospect.phone, `Importado da prospecção. ${prospect.qualification_reason || ''}`]
+      )).rows[0];
+      await client.query("UPDATE prospects SET status='imported', crm_lead_id=$1, updated_at=NOW() WHERE id=$2", [lead.id, prospect.id]);
+      importedCount++;
+    }
+    await client.query('COMMIT');
+    res.json({ importedCount });
+  } catch (e) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ error: e.message });
+  } finally { client?.release(); pool.end().catch(() => {}); }
+});
+
+app.post('/api/prospecting/prospects/export', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const ids = Array.isArray(req.body?.prospectIds) ? req.body.prospectIds.slice(0, 1000) : [];
+    const result = ids.length
+      ? await pool.query('SELECT * FROM prospects WHERE business_id=$1 AND id=ANY($2::uuid[]) ORDER BY company_name', [authorized.business.id, ids])
+      : await pool.query('SELECT * FROM prospects WHERE business_id=$1 ORDER BY company_name', [authorized.business.id]);
+    const csv = value => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    const rows = result.rows.map(item => [item.company_name, item.segment, item.city, item.state, item.website, item.email, item.phone, item.qualification_score, item.qualification_fit, item.status].map(csv).join(','));
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="prospects.csv"');
+    res.send('\uFEFF' + ['Empresa,Segmento,Cidade,Estado,Site,Email,Telefone,Pontuação,Aderência,Status', ...rows].join('\n'));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+app.get('/api/prospecting/prospects/:id', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const prospect = (await pool.query('SELECT * FROM prospects WHERE id=$1 AND business_id=$2', [req.params.id, authorized.business.id])).rows[0];
+    if (!prospect) return res.status(404).json({ error: 'Prospect não encontrado.' });
+    const contacts = (await pool.query('SELECT * FROM prospect_contacts WHERE prospect_id=$1 ORDER BY is_primary DESC, created_at', [prospect.id])).rows;
+    res.json({ prospect: prospectForClient(prospect), contacts: contacts.map(contact => ({ ...contact, prospectId: contact.prospect_id, sourceUrl: contact.source_url, isPrimary: contact.is_primary, createdAt: contact.created_at })) });
   } catch (e) { res.status(500).json({ error: e.message }); }
   finally { pool.end().catch(() => {}); }
 });
@@ -406,7 +1341,7 @@ async function getAuthorizedBusiness(pool, req) {
   )).rows[0];
   if (!member) return { error: 404, message: 'Organização não encontrada.' };
   const business = (await pool.query(
-    'SELECT id FROM businesses WHERE organization_id=$1 LIMIT 1',
+    'SELECT * FROM businesses WHERE organization_id=$1 LIMIT 1',
     [member.organization_id]
   )).rows[0];
   if (!business) return { error: 404, message: 'Empresa não encontrada.' };

@@ -46,10 +46,12 @@ export function StrategyPage() {
       if (res.ok) {
         await fetchStrategy();
       } else {
-        alert("Erro ao regenerar");
+        const error = await res.json().catch(() => null);
+        alert(error?.error ? `Erro ao gerar estratégia: ${error.error}` : 'Erro ao gerar estratégia.');
       }
     } catch (e) {
       console.error(e);
+      alert('Não foi possível conectar ao servidor para gerar a estratégia.');
     } finally {
       setIsRegenerating(false);
     }
@@ -69,7 +71,7 @@ export function StrategyPage() {
         </header>
         <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-200 text-center">
           <h2 className="text-lg font-bold">Você ainda não possui uma estratégia.</h2>
-          <button className="mt-4 px-4 py-2 text-sm font-medium bg-indigo-600 text-white rounded-md hover:bg-indigo-700">
+          <button onClick={handleRegenerate} className="mt-4 px-4 py-2 text-sm font-medium bg-indigo-600 text-white rounded-md hover:bg-indigo-700">
             Criar estratégia
           </button>
         </div>
