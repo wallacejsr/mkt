@@ -30,6 +30,14 @@ export interface ProspectDetail {
   domain?: string;
   phone?: string;
   email?: string;
+  taxId?: string;
+  address?: string;
+  neighborhood?: string;
+  postalCode?: string;
+  notes?: string;
+  sourceType?: 'search' | 'spreadsheet';
+  importBatchKey?: string;
+  importFileName?: string;
   emailType?: string;
   websiteStatus?: string;
   sourceUrl?: string;
@@ -89,7 +97,15 @@ export function ProspectDrawer({ prospectId, onClose, onImportToCRM, onRefreshPr
       if (!res.ok) throw new Error('Falha ao buscar detalhes do prospect.');
       const data = await res.json();
       setProspect(data.prospect);
-      setContacts(data.contacts || []);
+      const savedContacts = data.contacts || [];
+      if (savedContacts.length) {
+        setContacts(savedContacts);
+      } else {
+        const directContacts: ProspectContactDetail[] = [];
+        if (data.prospect?.email) directContacts.push({ id: 'primary-email', type: 'email', value: data.prospect.email, label: 'E-mail da base', confidence: data.prospect.confidence || 'medium', isPrimary: true });
+        if (data.prospect?.phone) directContacts.push({ id: 'primary-phone', type: 'phone', value: data.prospect.phone, label: 'Telefone da base', confidence: data.prospect.confidence || 'medium', isPrimary: true });
+        setContacts(directContacts);
+      }
     } catch (err: any) {
       setError(err.message || 'Erro ao carregar dados do prospect.');
     } finally {
@@ -266,6 +282,20 @@ export function ProspectDrawer({ prospectId, onClose, onImportToCRM, onRefreshPr
                     </div>
                   )}
 
+                  {prospect.taxId && (
+                    <div className="flex items-center gap-2 text-slate-700">
+                      <ShieldCheck className="w-4 h-4 text-slate-400" />
+                      <span><strong>CNPJ/CPF:</strong> {prospect.taxId}</span>
+                    </div>
+                  )}
+
+                  {prospect.address && (
+                    <div className="flex items-start gap-2 text-slate-700">
+                      <MapPin className="mt-0.5 w-4 h-4 text-slate-400" />
+                      <span>{[prospect.address, prospect.neighborhood, prospect.postalCode].filter(Boolean).join(' · ')}</span>
+                    </div>
+                  )}
+
                   {prospect.website && (
                     <div className="flex items-center gap-2 text-slate-700">
                       <Globe className="w-4 h-4 text-slate-400" />
@@ -284,6 +314,11 @@ export function ProspectDrawer({ prospectId, onClose, onImportToCRM, onRefreshPr
                   {prospect.description && (
                     <p className="text-slate-600 pt-2 border-t border-slate-100 leading-relaxed">
                       {prospect.description}
+                    </p>
+                  )}
+                  {prospect.notes && (
+                    <p className="text-slate-600 pt-2 border-t border-slate-100 leading-relaxed whitespace-pre-line">
+                      <strong>Observações:</strong> {prospect.notes}
                     </p>
                   )}
                 </div>

@@ -409,19 +409,18 @@ export class ProspectingService {
         continue;
       }
 
-      // Check for duplicate lead in CRM by email
-      if (prospect.email) {
-        const existingLeads = await db.select().from(leads)
-          .where(and(eq(leads.businessId, businessId), ilike(leads.email, prospect.email)))
-          .limit(1);
+      const duplicateConditions: any[] = [ilike(leads.companyName, prospect.companyName)];
+      if (prospect.email) duplicateConditions.push(ilike(leads.email, prospect.email));
+      if (prospect.phone) duplicateConditions.push(ilike(leads.phone, prospect.phone));
+      const existingLeads = await db.select().from(leads)
+        .where(and(eq(leads.businessId, businessId), or(...duplicateConditions)))
+        .limit(1);
 
-        if (existingLeads.length > 0) {
-          // Link to existing lead
-          await db.update(prospects)
-            .set({ crmLeadId: existingLeads[0].id, status: 'imported', updatedAt: new Date() })
-            .where(eq(prospects.id, prospect.id));
-          continue;
-        }
+      if (existingLeads.length > 0) {
+        await db.update(prospects)
+          .set({ crmLeadId: existingLeads[0].id, status: 'imported', updatedAt: new Date() })
+          .where(eq(prospects.id, prospect.id));
+        continue;
       }
 
       const notes = `Origem: Prospecção B2B\nFonte do Contato: ${prospect.sourceUrl || prospect.contactSource || 'Publicamente disponibilizado'}\nScore de Qualificação: ${prospect.qualificationScore || 0}/100\nJustificativa: ${prospect.qualificationReason || ''}\nPossível Necessidade: ${prospect.possibleNeed || ''}`;
@@ -432,7 +431,7 @@ export class ProspectingService {
         businessId,
         name: prospect.companyName,
         companyName: prospect.companyName,
-        email: prospect.email || `contato@${prospect.domain || 'prospect.com'}`,
+        email: prospect.email || null,
         phone: prospect.phone || '',
         source: 'prospecting',
         status: 'new',

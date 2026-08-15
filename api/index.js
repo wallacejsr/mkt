@@ -1067,6 +1067,15 @@ function prospectForClient(row) {
     searchId: row.search_id,
     companyName: row.company_name,
     legalName: row.legal_name,
+    taxId: row.tax_id,
+    address: row.address,
+    neighborhood: row.neighborhood,
+    postalCode: row.postal_code,
+    notes: row.notes,
+    sourceType: row.source_type,
+    importBatchKey: row.import_batch_key,
+    importFileName: row.import_file_name,
+    importedAt: row.imported_at,
     emailType: row.email_type,
     websiteStatus: row.website_status,
     sourceUrl: row.source_url,
@@ -1079,6 +1088,35 @@ function prospectForClient(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+let prospectingImportSchemaReady = false;
+async function ensureProspectingImportSchema(pool) {
+  if (prospectingImportSchemaReady) return;
+  await pool.query(`
+    ALTER TABLE prospects ADD COLUMN IF NOT EXISTS tax_id text;
+    ALTER TABLE prospects ADD COLUMN IF NOT EXISTS address text;
+    ALTER TABLE prospects ADD COLUMN IF NOT EXISTS neighborhood text;
+    ALTER TABLE prospects ADD COLUMN IF NOT EXISTS postal_code text;
+    ALTER TABLE prospects ADD COLUMN IF NOT EXISTS notes text;
+    ALTER TABLE prospects ADD COLUMN IF NOT EXISTS source_type text DEFAULT 'search';
+    ALTER TABLE prospects ADD COLUMN IF NOT EXISTS import_batch_key text;
+    ALTER TABLE prospects ADD COLUMN IF NOT EXISTS import_file_name text;
+    ALTER TABLE prospects ADD COLUMN IF NOT EXISTS imported_at timestamp;
+    CREATE INDEX IF NOT EXISTS prospects_business_source_idx ON prospects (business_id, source_type);
+    CREATE INDEX IF NOT EXISTS prospects_business_tax_id_idx ON prospects (business_id, tax_id);
+  `);
+  prospectingImportSchemaReady = true;
+}
+
+function cleanSpreadsheetValue(value, maxLength = 500) {
+  const text = String(value ?? '').trim();
+  return text ? text.slice(0, maxLength) : null;
+}
+
+function digitsOnly(value, maxLength = 20) {
+  const valueDigits = String(value ?? '').replace(/\D/g, '');
+  return valueDigits && !/^0+$/.test(valueDigits) ? valueDigits.slice(0, maxLength) : null;
 }
 
 function normalizeProspectingText(value) {
@@ -1279,6 +1317,7 @@ app.get('/api/prospecting/prospects', async (req, res) => {
   try {
     const authorized = await getAuthorizedBusiness(pool, req);
     if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    if (req.query.origin === 'spreadsheet' || req.query.origin === 'search') await ensureProspectingImportSchema(pool);
     const conditions = ['business_id=$1'];
     const values = [authorized.business.id];
     const add = (condition, value) => { values.push(value); conditions.push(condition.replace('?', `$${values.length}`)); };
@@ -1287,6 +1326,10 @@ app.get('/api/prospecting/prospects', async (req, res) => {
     if (req.query.hasWebsite === 'true') conditions.push("website IS NOT NULL AND website<>''");
     if (req.query.status) add('status=?', String(req.query.status));
     if (req.query.fit) add('qualification_fit=?', String(req.query.fit));
+    if (req.query.origin === 'spreadsheet') conditions.push("source_type='spreadsheet'");
+    if (req.query.origin === 'search') conditions.push("COALESCE(source_type, 'search')='search'");
+    if (req.query.state) add('state ILIKE ?', String(req.query.state).trim());
+    if (req.query.segment) add('segment ILIKE ?', `%${String(req.query.segment).trim()}%`);
     if (req.query.search) add("(company_name ILIKE ? OR city ILIKE ? OR email ILIKE ? OR website ILIKE ?)", `%${String(req.query.search).trim()}%`);
     // Expand the single search placeholder safely for all four searchable columns.
     if (req.query.search) {
@@ -1296,8 +1339,117 @@ app.get('/api/prospecting/prospects', async (req, res) => {
       for (let i = 0; i < 4; i++) { values.push(searchValue); placeholders.push(`$${values.length}`); }
       conditions.push(`(company_name ILIKE ${placeholders[0]} OR city ILIKE ${placeholders[1]} OR email ILIKE ${placeholders[2]} OR website ILIKE ${placeholders[3]})`);
     }
-    const rows = (await pool.query(`SELECT * FROM prospects WHERE ${conditions.join(' AND ')} ORDER BY qualification_score DESC NULLS LAST, created_at DESC`, values)).rows;
-    res.json({ prospects: rows.map(prospectForClient) });
+    const page = Math.max(1, Number(req.query.page || 1));
+    const pageSize = Math.min(200, Math.max(25, Number(req.query.pageSize || (req.query.origin === 'spreadsheet' ? 100 : 200))));
+    const count = Number((await pool.query(`SELECT COUNT(*) FROM prospects WHERE ${conditions.join(' AND ')}`, values)).rows[0]?.count || 0);
+    const queryValues = [...values, pageSize, (page - 1) * pageSize];
+    const rows = (await pool.query(`SELECT * FROM prospects WHERE ${conditions.join(' AND ')} ORDER BY qualification_score DESC NULLS LAST, created_at DESC LIMIT $${queryValues.length - 1} OFFSET $${queryValues.length}`, queryValues)).rows;
+    res.json({ prospects: rows.map(prospectForClient), pagination: { page, pageSize, total: count, totalPages: Math.max(1, Math.ceil(count / pageSize)) } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/prospecting/import-spreadsheet', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const inputRows = Array.isArray(req.body?.rows) ? req.body.rows.slice(0, 250) : [];
+    if (!inputRows.length) return res.status(400).json({ error: 'Nenhuma empresa foi enviada para importação.' });
+    await ensureProspectingImportSchema(pool);
+
+    const existingRows = (await pool.query(
+      `SELECT tax_id, LOWER(COALESCE(email,'')) AS email,
+              regexp_replace(COALESCE(phone,''), '\\D', '', 'g') AS phone,
+              LOWER(COALESCE(company_name,'')) || '|' || LOWER(COALESCE(city,'')) AS name_city
+         FROM prospects WHERE business_id=$1`,
+      [authorized.business.id]
+    )).rows;
+    const known = new Set();
+    for (const item of existingRows) {
+      if (item.tax_id) known.add(`tax:${digitsOnly(item.tax_id, 20)}`);
+      if (item.email) known.add(`email:${item.email}`);
+      if (item.phone) known.add(`phone:${item.phone}`);
+      if (item.name_city !== '|') known.add(`name:${item.name_city}`);
+    }
+
+    const accepted = [];
+    let duplicates = 0;
+    let invalid = 0;
+    for (const raw of inputRows) {
+      const companyName = cleanSpreadsheetValue(raw?.companyName, 250);
+      if (!companyName) { invalid++; continue; }
+      const taxId = digitsOnly(raw?.taxId, 20);
+      const email = cleanSpreadsheetValue(raw?.email, 250)?.toLowerCase() || null;
+      const phone = digitsOnly(raw?.phone, 20);
+      const city = cleanSpreadsheetValue(raw?.city, 120);
+      const signatures = [
+        taxId ? `tax:${taxId}` : null,
+        email ? `email:${email}` : null,
+        phone ? `phone:${phone}` : null,
+        `name:${companyName.toLowerCase()}|${String(city || '').toLowerCase()}`,
+      ].filter(Boolean);
+      if (signatures.some(signature => known.has(signature))) { duplicates++; continue; }
+      signatures.forEach(signature => known.add(signature));
+      accepted.push({
+        companyName, taxId, email, phone, city,
+        address: cleanSpreadsheetValue(raw?.address, 500),
+        neighborhood: cleanSpreadsheetValue(raw?.neighborhood, 150),
+        state: cleanSpreadsheetValue(raw?.state, 40)?.toUpperCase() || null,
+        postalCode: digitsOnly(raw?.postalCode, 12),
+        segment: cleanSpreadsheetValue(raw?.segment, 200),
+        notes: cleanSpreadsheetValue(raw?.notes, 4000),
+      });
+    }
+
+    if (accepted.length) {
+      const fileName = cleanSpreadsheetValue(req.body?.fileName, 250) || 'Planilha importada';
+      const batchKey = cleanSpreadsheetValue(req.body?.batchKey, 100) || `${Date.now()}`;
+      const params = [];
+      const tuples = accepted.map(item => {
+        const score = Math.min(70, 20 + [item.taxId, item.email, item.phone, item.address].filter(Boolean).length * 10);
+        const values = [
+          authorized.business.organization_id, authorized.business.id, item.companyName, item.companyName,
+          item.segment, item.city, item.state, 'Brasil', item.phone, item.email, item.taxId, item.address,
+          item.neighborhood, item.postalCode, item.notes, 'spreadsheet', batchKey, fileName,
+          item.email ? 'general' : null, item.email || item.phone ? 'contact_found' : 'no_website_found',
+          `Planilha: ${fileName}`, item.email && item.phone ? 'high' : 'medium', score,
+          'Importado de planilha; aguardando qualificação comercial.', score >= 60 ? 'medium' : 'low', 'new',
+        ];
+        const placeholders = values.map(value => { params.push(value); return `$${params.length}`; });
+        return `(${placeholders.join(',')}, NOW(), NOW(), NOW())`;
+      });
+      await pool.query(
+        `INSERT INTO prospects
+          (organization_id, business_id, company_name, legal_name, segment, city, state, country, phone, email,
+           tax_id, address, neighborhood, postal_code, notes, source_type, import_batch_key, import_file_name,
+           email_type, website_status, contact_source, confidence, qualification_score, qualification_reason,
+           qualification_fit, status, imported_at, created_at, updated_at)
+         VALUES ${tuples.join(',')}`,
+        params
+      );
+    }
+    res.json({ imported: accepted.length, duplicates, invalid });
+  } catch (e) {
+    console.error('[prospecting-spreadsheet-import]', e.message);
+    res.status(500).json({ error: e.message || 'Falha ao importar a planilha.' });
+  } finally { pool.end().catch(() => {}); }
+});
+
+app.patch('/api/prospecting/prospects/status', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const ids = Array.isArray(req.body?.prospectIds) ? req.body.prospectIds.slice(0, 250) : [];
+    const allowed = new Set(['new', 'reviewed', 'qualified', 'disqualified']);
+    const status = String(req.body?.status || '');
+    if (!ids.length || !allowed.has(status)) return res.status(400).json({ error: 'Seleção ou status inválido.' });
+    const updated = await pool.query(
+      'UPDATE prospects SET status=$1, updated_at=NOW() WHERE business_id=$2 AND id=ANY($3::uuid[]) AND crm_lead_id IS NULL RETURNING id',
+      [status, authorized.business.id, ids]
+    );
+    res.json({ updatedCount: updated.rowCount || 0 });
   } catch (e) { res.status(500).json({ error: e.message }); }
   finally { pool.end().catch(() => {}); }
 });
@@ -1316,6 +1468,24 @@ app.post('/api/prospecting/prospects/import', async (req, res) => {
     let importedCount = 0;
     for (const prospect of prospects) {
       if (prospect.crm_lead_id) continue;
+      const duplicateConditions = ['LOWER(company_name)=LOWER($2)'];
+      const duplicateValues = [authorized.business.id, prospect.company_name];
+      if (prospect.email) {
+        duplicateValues.push(prospect.email);
+        duplicateConditions.push(`LOWER(email)=LOWER($${duplicateValues.length})`);
+      }
+      if (prospect.phone) {
+        duplicateValues.push(String(prospect.phone).replace(/\D/g, ''));
+        duplicateConditions.push(`regexp_replace(COALESCE(phone,''), '\\D', '', 'g')=$${duplicateValues.length}`);
+      }
+      const existingLead = (await client.query(
+        `SELECT id FROM leads WHERE business_id=$1 AND (${duplicateConditions.join(' OR ')}) LIMIT 1`,
+        duplicateValues
+      )).rows[0];
+      if (existingLead) {
+        await client.query("UPDATE prospects SET status='imported', crm_lead_id=$1, updated_at=NOW() WHERE id=$2", [existingLead.id, prospect.id]);
+        continue;
+      }
       const lead = (await client.query(
         `INSERT INTO leads (organization_id, business_id, name, company_name, email, phone, source, status, notes)
          VALUES ($1,$2,$3,$4,$5,$6,'Prospecção','new',$7) RETURNING id`,
@@ -1342,10 +1512,10 @@ app.post('/api/prospecting/prospects/export', async (req, res) => {
       ? await pool.query('SELECT * FROM prospects WHERE business_id=$1 AND id=ANY($2::uuid[]) ORDER BY company_name', [authorized.business.id, ids])
       : await pool.query('SELECT * FROM prospects WHERE business_id=$1 ORDER BY company_name', [authorized.business.id]);
     const csv = value => `"${String(value ?? '').replace(/"/g, '""')}"`;
-    const rows = result.rows.map(item => [item.company_name, item.segment, item.city, item.state, item.website, item.email, item.phone, item.qualification_score, item.qualification_fit, item.status].map(csv).join(','));
+    const rows = result.rows.map(item => [item.company_name, item.tax_id, item.segment, item.city, item.state, item.website, item.email, item.phone, item.qualification_score, item.qualification_fit, item.status, item.import_file_name].map(csv).join(','));
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="prospects.csv"');
-    res.send('\uFEFF' + ['Empresa,Segmento,Cidade,Estado,Site,Email,Telefone,Pontuação,Aderência,Status', ...rows].join('\n'));
+    res.send('\uFEFF' + ['Empresa,CNPJ/CPF,Segmento,Cidade,Estado,Site,Email,Telefone,Pontuação,Aderência,Status,Arquivo de origem', ...rows].join('\n'));
   } catch (e) { res.status(500).json({ error: e.message }); }
   finally { pool.end().catch(() => {}); }
 });

@@ -11,6 +11,7 @@ import { eq, and, ilike, or, desc, inArray, sql } from "drizzle-orm";
 import { requireAuth } from "../../middleware/auth";
 import { ProspectingService } from "../services/ProspectingService";
 import { qualifyProspect, generateApproach } from "../services/ProspectScoringService";
+import { ensureProspectingImportSchema, importProspectSpreadsheetRows } from "../services/ProspectSpreadsheetImportService";
 
 export const prospectingRouter = Router();
 
@@ -129,7 +130,9 @@ prospectingRouter.get("/searches/:searchId", requireAuth, ensureBusinessOwnershi
  */
 prospectingRouter.get("/prospects", requireAuth, ensureBusinessOwnership, async (req: any, res) => {
   try {
-    const { hasEmail, hasPhone, hasWebsite, status, search, fit } = req.query;
+    const { hasEmail, hasPhone, hasWebsite, status, search, fit, origin, state, segment } = req.query;
+
+    if (origin === 'spreadsheet' || origin === 'search') await ensureProspectingImportSchema();
 
     const conditions: any[] = [eq(prospects.businessId, req.business.id)];
 
@@ -148,6 +151,10 @@ prospectingRouter.get("/prospects", requireAuth, ensureBusinessOwnership, async 
     if (fit) {
       conditions.push(eq(prospects.qualificationFit, fit as string));
     }
+    if (origin === 'spreadsheet') conditions.push(eq(prospects.sourceType, 'spreadsheet'));
+    if (origin === 'search') conditions.push(or(eq(prospects.sourceType, 'search'), sql`${prospects.sourceType} IS NULL`));
+    if (state) conditions.push(ilike(prospects.state, String(state)));
+    if (segment) conditions.push(ilike(prospects.segment, `%${String(segment)}%`));
     if (search && typeof search === 'string' && search.trim() !== '') {
       const q = `%${search.trim()}%`;
       conditions.push(or(
@@ -158,14 +165,53 @@ prospectingRouter.get("/prospects", requireAuth, ensureBusinessOwnership, async 
       ));
     }
 
-    const prospectList = await db.select().from(prospects)
+    const allProspects = await db.select().from(prospects)
       .where(and(...conditions))
       .orderBy(desc(prospects.qualificationScore), desc(prospects.createdAt));
-
-    res.json({ prospects: prospectList });
+    const page = Math.max(1, Number(req.query.page || 1));
+    const pageSize = Math.min(200, Math.max(25, Number(req.query.pageSize || 100)));
+    const prospectList = allProspects.slice((page - 1) * pageSize, page * pageSize);
+    res.json({
+      prospects: prospectList,
+      pagination: { page, pageSize, total: allProspects.length, totalPages: Math.max(1, Math.ceil(allProspects.length / pageSize)) },
+    });
   } catch (error: any) {
     console.error("Error listing prospects:", error);
     res.status(500).json({ error: "Falha ao carregar lista de prospects." });
+  }
+});
+
+prospectingRouter.post("/import-spreadsheet", requireAuth, ensureBusinessOwnership, async (req: any, res) => {
+  try {
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    if (!rows.length) return res.status(400).json({ error: 'Nenhuma empresa foi enviada para importação.' });
+    const result = await importProspectSpreadsheetRows({
+      organizationId: req.business.organizationId,
+      businessId: req.business.id,
+      rows,
+      fileName: req.body?.fileName,
+      batchKey: req.body?.batchKey,
+    });
+    res.json(result);
+  } catch (error: any) {
+    console.error('Error importing spreadsheet:', error);
+    res.status(500).json({ error: error.message || 'Falha ao importar a planilha.' });
+  }
+});
+
+prospectingRouter.patch("/prospects/status", requireAuth, ensureBusinessOwnership, async (req: any, res) => {
+  try {
+    const ids = Array.isArray(req.body?.prospectIds) ? req.body.prospectIds.slice(0, 250) : [];
+    const status = String(req.body?.status || '');
+    if (!ids.length || !['new', 'reviewed', 'qualified', 'disqualified'].includes(status)) {
+      return res.status(400).json({ error: 'Seleção ou status inválido.' });
+    }
+    const updated = await db.update(prospects).set({ status, updatedAt: new Date() })
+      .where(and(eq(prospects.businessId, req.business.id), inArray(prospects.id, ids), sql`${prospects.crmLeadId} IS NULL`))
+      .returning({ id: prospects.id });
+    res.json({ updatedCount: updated.length });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Falha ao atualizar os prospects.' });
   }
 });
 

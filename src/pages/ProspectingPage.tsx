@@ -19,12 +19,17 @@ import {
   PlusCircle, 
   ShieldCheck, 
   RefreshCw,
-  X
+  X,
+  FileSpreadsheet,
+  Upload,
+  UserCheck,
+  UserX
 } from 'lucide-react';
 import { useAuth } from '../lib/auth-context';
 import { NewSearchModal } from '../components/prospecting/NewSearchModal';
 import { ProspectDrawer, ProspectDetail } from '../components/prospecting/ProspectDrawer';
 import { ApproachModal } from '../components/prospecting/ApproachModal';
+import { SpreadsheetImportModal } from '../components/prospecting/SpreadsheetImportModal';
 
 interface SearchHistoryItem {
   id: string;
@@ -45,6 +50,12 @@ export function ProspectingPage() {
   const [searches, setSearches] = useState<SearchHistoryItem[]>([]);
   const [prospects, setProspects] = useState<ProspectDetail[]>([]);
   const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<'search' | 'spreadsheet'>('search');
+  const [isSpreadsheetModalOpen, setIsSpreadsheetModalOpen] = useState(false);
+  const [filterState, setFilterState] = useState('');
+  const [filterSegment, setFilterSegment] = useState('');
+  const [page, setPage] = useState(1);
+  const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 1 });
   
   // Modals & Drawers state
   const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
@@ -74,16 +85,23 @@ export function ProspectingPage() {
     if (business?.id) {
       fetchData();
     }
-  }, [business?.id, filterEmail, filterPhone, filterWebsite, filterStatus, filterFit, searchQuery]);
+  }, [business?.id, activeTab, filterEmail, filterPhone, filterWebsite, filterStatus, filterFit, filterState, filterSegment, searchQuery, page]);
+
+  useEffect(() => {
+    setPage(1);
+    setSelectedIds([]);
+  }, [activeTab, filterEmail, filterPhone, filterWebsite, filterStatus, filterFit, filterState, filterSegment, searchQuery]);
 
   const fetchData = async () => {
     try {
       setLoading(true);
       // Fetch recent searches
-      const searchRes = await authFetch(`/api/prospecting/searches?businessId=${business?.id}`);
-      if (searchRes.ok) {
-        const data = await searchRes.json();
-        setSearches(data.searches || []);
+      if (activeTab === 'search') {
+        const searchRes = await authFetch(`/api/prospecting/searches?businessId=${business?.id}`);
+        if (searchRes.ok) {
+          const data = await searchRes.json();
+          setSearches(data.searches || []);
+        }
       }
 
       // Build prospects query
@@ -93,12 +111,18 @@ export function ProspectingPage() {
       if (filterWebsite) params.append('hasWebsite', 'true');
       if (filterStatus !== 'all') params.append('status', filterStatus);
       if (filterFit !== 'all') params.append('fit', filterFit);
+      params.append('origin', activeTab);
+      params.append('page', String(page));
+      params.append('pageSize', '100');
+      if (filterState.trim()) params.append('state', filterState.trim());
+      if (filterSegment.trim()) params.append('segment', filterSegment.trim());
       if (searchQuery.trim()) params.append('search', searchQuery.trim());
 
       const prospectRes = await authFetch(`/api/prospecting/prospects?${params.toString()}`);
       if (prospectRes.ok) {
         const data = await prospectRes.json();
         setProspects(data.prospects || []);
+        setPagination(data.pagination || { page: 1, total: data.prospects?.length || 0, totalPages: 1 });
       }
     } catch (err) {
       console.error('Error loading prospecting data:', err);
@@ -209,6 +233,23 @@ export function ProspectingPage() {
     }
   };
 
+  const handleBulkStatus = async (status: 'qualified' | 'disqualified') => {
+    if (!selectedIds.length) return;
+    try {
+      const res = await authFetch(`/api/prospecting/prospects/status?businessId=${business?.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prospectIds: selectedIds, status }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Falha ao atualizar empresas.');
+      setSelectedIds([]);
+      await fetchData();
+    } catch (err: any) {
+      alert(err.message || 'Erro ao atualizar empresas.');
+    }
+  };
+
   const getStatusBadge = (status: string) => {
     switch (status) {
       case 'imported':
@@ -234,16 +275,31 @@ export function ProspectingPage() {
         </div>
 
         <button
-          onClick={() => setIsSearchModalOpen(true)}
+          onClick={() => activeTab === 'search' ? setIsSearchModalOpen(true) : setIsSpreadsheetModalOpen(true)}
           className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-semibold text-sm shadow-sm transition-colors flex items-center gap-2 self-start md:self-auto"
         >
-          <Plus className="w-4 h-4" />
-          Nova busca
+          {activeTab === 'search' ? <Plus className="w-4 h-4" /> : <Upload className="w-4 h-4" />}
+          {activeTab === 'search' ? 'Nova busca' : 'Importar planilha'}
+        </button>
+      </div>
+
+      <div className="inline-flex rounded-xl border border-slate-200 bg-white p-1 shadow-2xs">
+        <button
+          onClick={() => setActiveTab('search')}
+          className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${activeTab === 'search' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+        >
+          <Search className="h-4 w-4" /> Buscar empresas
+        </button>
+        <button
+          onClick={() => setActiveTab('spreadsheet')}
+          className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${activeTab === 'spreadsheet' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+        >
+          <FileSpreadsheet className="h-4 w-4" /> Base importada
         </button>
       </div>
 
       {/* Main Content */}
-      {searches.length === 0 && !loading && prospects.length === 0 ? (
+      {activeTab === 'search' && searches.length === 0 && !loading && prospects.length === 0 ? (
         /* Empty State */
         <div className="bg-white border border-slate-200 rounded-2xl p-12 text-center max-w-2xl mx-auto my-8 shadow-2xs">
           <div className="w-16 h-16 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-5">
@@ -264,7 +320,7 @@ export function ProspectingPage() {
       ) : (
         <>
           {/* Histórico de Buscas Recentes */}
-          {searches.length > 0 && (
+          {activeTab === 'search' && searches.length > 0 && (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Buscas Recentes</h2>
@@ -332,14 +388,26 @@ export function ProspectingPage() {
                 {/* Bulk Actions & Export */}
                 <div className="flex items-center gap-2 self-end md:self-auto">
                   {selectedIds.length > 0 && (
-                    <button
-                      onClick={handleBulkImport}
-                      disabled={bulkImporting}
-                      className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-semibold text-xs transition-colors flex items-center gap-1.5 shadow-2xs"
-                    >
-                      <PlusCircle className="w-3.5 h-3.5" />
-                      Adicionar {selectedIds.length} ao CRM
-                    </button>
+                    <>
+                      {activeTab === 'spreadsheet' && (
+                        <>
+                          <button onClick={() => handleBulkStatus('qualified')} className="px-3 py-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg font-semibold text-xs flex items-center gap-1.5">
+                            <UserCheck className="h-3.5 w-3.5" /> Qualificar
+                          </button>
+                          <button onClick={() => handleBulkStatus('disqualified')} className="px-3 py-1.5 bg-slate-50 text-slate-600 border border-slate-200 rounded-lg font-semibold text-xs flex items-center gap-1.5">
+                            <UserX className="h-3.5 w-3.5" /> Descartar
+                          </button>
+                        </>
+                      )}
+                      <button
+                        onClick={handleBulkImport}
+                        disabled={bulkImporting}
+                        className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-semibold text-xs transition-colors flex items-center gap-1.5 shadow-2xs"
+                      >
+                        <PlusCircle className="w-3.5 h-3.5" />
+                        Adicionar {selectedIds.length} ao CRM
+                      </button>
+                    </>
                   )}
 
                   <button
@@ -370,6 +438,23 @@ export function ProspectingPage() {
                   Com e-mail
                 </button>
 
+                {activeTab === 'spreadsheet' && (
+                  <>
+                    <input
+                      value={filterState}
+                      onChange={event => setFilterState(event.target.value.toUpperCase().slice(0, 2))}
+                      placeholder="UF"
+                      className="w-16 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600 outline-none focus:border-indigo-400"
+                    />
+                    <input
+                      value={filterSegment}
+                      onChange={event => setFilterSegment(event.target.value)}
+                      placeholder="Segmento"
+                      className="w-32 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600 outline-none focus:border-indigo-400"
+                    />
+                  </>
+                )}
+
                 <button
                   onClick={() => setFilterPhone(!filterPhone)}
                   className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-all ${
@@ -381,16 +466,18 @@ export function ProspectingPage() {
                   Com telefone
                 </button>
 
-                <button
-                  onClick={() => setFilterWebsite(!filterWebsite)}
-                  className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-all ${
-                    filterWebsite
-                      ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
-                      : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
-                  }`}
-                >
-                  Com site
-                </button>
+                {activeTab === 'search' && (
+                  <button
+                    onClick={() => setFilterWebsite(!filterWebsite)}
+                    className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-all ${
+                      filterWebsite
+                        ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                        : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    Com site
+                  </button>
+                )}
 
                 <select
                   value={filterFit}
@@ -445,7 +532,7 @@ export function ProspectingPage() {
                         <th className="p-3">Empresa</th>
                         <th className="p-3">Segmento</th>
                         <th className="p-3">Cidade</th>
-                        <th className="p-3">Site</th>
+                        <th className="p-3">{activeTab === 'spreadsheet' ? 'CNPJ/CPF' : 'Site'}</th>
                         <th className="p-3">E-mail Comercial</th>
                         <th className="p-3">Telefone</th>
                         <th className="p-3 text-center">Score</th>
@@ -491,7 +578,9 @@ export function ProspectingPage() {
                             </td>
 
                             <td className="p-3">
-                              {prospect.website ? (
+                              {activeTab === 'spreadsheet' ? (
+                                <span className="font-mono text-[11px] text-slate-700">{prospect.taxId || '-'}</span>
+                              ) : prospect.website ? (
                                 <a
                                   href={prospect.website}
                                   target="_blank"
@@ -548,6 +637,15 @@ export function ProspectingPage() {
                 </div>
               )}
             </div>
+            {activeTab === 'spreadsheet' && pagination.totalPages > 1 && (
+              <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600">
+                <span>{pagination.total.toLocaleString('pt-BR')} empresas · página {pagination.page} de {pagination.totalPages}</span>
+                <div className="flex gap-2">
+                  <button disabled={page <= 1} onClick={() => setPage(current => Math.max(1, current - 1))} className="rounded-lg border border-slate-200 px-3 py-1.5 font-semibold disabled:opacity-40">Anterior</button>
+                  <button disabled={page >= pagination.totalPages} onClick={() => setPage(current => current + 1)} className="rounded-lg border border-slate-200 px-3 py-1.5 font-semibold disabled:opacity-40">Próxima</button>
+                </div>
+              </div>
+            )}
           </div>
         </>
       )}
@@ -557,6 +655,15 @@ export function ProspectingPage() {
         isOpen={isSearchModalOpen}
         onClose={() => setIsSearchModalOpen(false)}
         onSubmit={handleCreateSearch}
+      />
+
+      <SpreadsheetImportModal
+        isOpen={isSpreadsheetModalOpen}
+        onClose={() => setIsSpreadsheetModalOpen(false)}
+        onImported={() => {
+          setPage(1);
+          fetchData();
+        }}
       />
 
       {/* Prospect Side Drawer */}

@@ -447,6 +447,15 @@ export const prospects = pgTable('prospects', {
   domain: text('domain'),
   phone: text('phone'),
   email: text('email'),
+  taxId: text('tax_id'),
+  address: text('address'),
+  neighborhood: text('neighborhood'),
+  postalCode: text('postal_code'),
+  notes: text('notes'),
+  sourceType: text('source_type').default('search'), // search, spreadsheet
+  importBatchKey: text('import_batch_key'),
+  importFileName: text('import_file_name'),
+  importedAt: timestamp('imported_at'),
   emailType: text('email_type'), // commercial, support, general, personal, unknown
   websiteStatus: text('website_status').default('no_website_found'), // no_website_found, website_found_no_contact, contact_found, fetch_failed, blocked_by_site
   sourceUrl: text('source_url'),
