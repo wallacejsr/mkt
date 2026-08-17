@@ -1943,9 +1943,11 @@ app.post('/api/prospecting/email/campaigns', async (req, res) => {
     const processingPurpose = String(req.body?.processingPurpose || '').trim().slice(0, 1000);
     const balanceTestReference = String(req.body?.balanceTestReference || '').trim().slice(0, 2000);
     const filters = parseRawEmailAudienceFilters(req.body?.audienceFilters || {});
+    const testRecipientEmail = String(req.body?.testRecipientEmail || '').trim().toLowerCase().slice(0, 250);
     if (!name || !subject || textBody.length < 40 || !senderName) return res.status(400).json({ error: 'Nome, remetente, assunto e uma mensagem com pelo menos 40 caracteres são obrigatórios.' });
     if (!/^[a-z0-9][a-z0-9._+-]{0,63}$/.test(senderLocalPart)) return res.status(400).json({ error: 'O endereço do remetente antes do @ é inválido.' });
     if (replyToEmail && !EMAIL_PATTERN.test(replyToEmail)) return res.status(400).json({ error: 'O e-mail de resposta é inválido.' });
+    if (testRecipientEmail && !EMAIL_PATTERN.test(testRecipientEmail)) return res.status(400).json({ error: 'Informe um e-mail de teste válido.' });
     if (!['legitimate_interest', 'consent'].includes(legalBasis) || processingPurpose.length < 15) return res.status(400).json({ error: 'Informe a base legal e a finalidade do tratamento dos contatos.' });
     if (legalBasis === 'legitimate_interest' && balanceTestReference.length < 20) return res.status(400).json({ error: 'Registre o teste de balanceamento do legítimo interesse antes de salvar.' });
     if (req.body?.includeUnsubscribe !== true) return res.status(400).json({ error: 'O descadastramento é obrigatório em campanhas de prospecção.' });
@@ -1960,10 +1962,18 @@ app.post('/api/prospecting/email/campaigns', async (req, res) => {
       `INSERT INTO email_campaigns
        (organization_id,business_id,created_by_user_id,name,status,subject,preview_text,html_body,text_body,sender_name,sender_email,reply_to_email,audience_filters,template_variables,legal_basis,processing_purpose,balance_test_reference,include_unsubscribe,provider)
        VALUES ($1,$2,$3,$4,'draft',$5,$6,$7,$8,$9,$10,$11,$12,'[]'::jsonb,$13,$14,$15,true,'resend') RETURNING *`,
-      [authorized.business.organization_id, authorized.business.id, decoded.userId, name, subject, previewText || null, htmlBody, textBody, senderName, senderEmail, replyToEmail || null, JSON.stringify(filters), legalBasis, processingPurpose, balanceTestReference || null]
+      [authorized.business.organization_id, authorized.business.id, decoded.userId, name, subject, previewText || null, htmlBody, textBody, senderName, senderEmail, replyToEmail || null, JSON.stringify(testRecipientEmail ? { ...filters, mode: 'test', testRecipientEmail } : filters), legalBasis, processingPurpose, balanceTestReference || null]
     )).rows[0];
-    const audience = rawEmailAudienceWhere(authorized.business.id, filters, 4);
-    await client.query(
+    if (testRecipientEmail) {
+      await client.query(
+        `INSERT INTO email_campaign_recipients
+          (organization_id,business_id,campaign_id,email,normalized_email,recipient_name,company_name,personalization,status)
+         VALUES ($1,$2,$3,$4,$4,'Destinatário de teste','Teste interno',$5::jsonb,'queued')`,
+        [authorized.business.organization_id, authorized.business.id, campaign.id, testRecipientEmail, JSON.stringify({ companyName: 'Teste interno', testRecipient: true })]
+      );
+    } else {
+      const audience = rawEmailAudienceWhere(authorized.business.id, filters, 4);
+      await client.query(
       `WITH ranked AS (
          SELECT p.id,p.company_name,p.legal_name,BTRIM(p.email) AS email,LOWER(BTRIM(p.email)) AS normalized_email,
                 ROW_NUMBER() OVER (PARTITION BY LOWER(BTRIM(p.email)) ORDER BY p.qualification_score DESC NULLS LAST,p.created_at DESC) AS email_rank
@@ -1978,8 +1988,9 @@ app.post('/api/prospecting/email/campaigns', async (req, res) => {
           AND NOT EXISTS (SELECT 1 FROM email_unsubscribes u WHERE u.business_id=$2 AND u.normalized_email=r.normalized_email)
           AND NOT EXISTS (SELECT 1 FROM email_suppressions s WHERE s.business_id=$2 AND s.normalized_email=r.normalized_email AND s.active=true)
        ON CONFLICT (campaign_id,normalized_email) DO NOTHING`,
-      [authorized.business.organization_id, authorized.business.id, campaign.id, ...audience.values]
-    );
+        [authorized.business.organization_id, authorized.business.id, campaign.id, ...audience.values]
+      );
+    }
     const total = Number((await client.query('SELECT COUNT(*)::int AS count FROM email_campaign_recipients WHERE campaign_id=$1', [campaign.id])).rows[0]?.count || 0);
     const updated = (await client.query('UPDATE email_campaigns SET total_recipients=$1,updated_at=NOW() WHERE id=$2 RETURNING *', [total, campaign.id])).rows[0];
     await client.query('COMMIT');

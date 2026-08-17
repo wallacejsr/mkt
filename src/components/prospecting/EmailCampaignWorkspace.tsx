@@ -26,6 +26,7 @@ type WorkerStatus = {
 
 const initialFilters: AudienceFilters = { origin: 'all', status: 'all', fit: 'all', state: '', segment: '' };
 const initialPreview: AudiencePreview = { totalWithEmail: 0, invalidCount: 0, duplicateCount: 0, suppressedCount: 0, eligibleCount: 0 };
+const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function statusLabel(status?: string) {
   const labels: Record<string, string> = {
@@ -343,11 +344,18 @@ function EmailCampaignBuilder({ domain, defaultSenderName, onClose, onSaved }: {
     subject: '', previewText: '', textBody: '', legalBasis: 'legitimate_interest',
     processingPurpose: 'Realizar contato comercial B2B relacionado aos serviços da empresa.',
     balanceTestReference: 'Contato dirigido a endereços profissionais, com mensagem pertinente à atividade da empresa e opção clara de descadastramento.',
-    includeUnsubscribe: true,
+    includeUnsubscribe: true, testRecipientEmail: '',
   });
+
+  const hasTestRecipient = Boolean(form.testRecipientEmail.trim());
+  const validTestRecipient = emailPattern.test(form.testRecipientEmail.trim());
 
   const query = useMemo(() => new URLSearchParams({ businessId: business?.id || '', ...filters }).toString(), [business?.id, filters]);
   useEffect(() => {
+    if (hasTestRecipient) {
+      setPreview({ ...initialPreview, totalWithEmail: validTestRecipient ? 1 : 0, invalidCount: validTestRecipient ? 0 : 1, eligibleCount: validTestRecipient ? 1 : 0 });
+      return;
+    }
     const timer = window.setTimeout(async () => {
       if (!business?.id) return;
       setPreviewing(true);
@@ -358,7 +366,7 @@ function EmailCampaignBuilder({ domain, defaultSenderName, onClose, onSaved }: {
       } finally { setPreviewing(false); }
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [query]);
+  }, [query, hasTestRecipient, validTestRecipient]);
 
   const generate = async () => {
     setGenerating(true); setError('');
@@ -413,10 +421,13 @@ function EmailCampaignBuilder({ domain, defaultSenderName, onClose, onSaved }: {
         </div>
         <aside className="space-y-5">
           <div className="rounded-xl border border-slate-200 p-4"><h3 className="mb-3 text-sm font-bold text-slate-900">Audiência</h3><div className="space-y-3">
-            <label className="block text-xs font-semibold text-slate-600">Origem<select value={filters.origin} onChange={event => setFilters({ ...filters, origin: event.target.value as AudienceFilters['origin'] })} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"><option value="all">Toda a base</option><option value="spreadsheet">Base importada</option><option value="search">Empresas pesquisadas</option></select></label>
-            <div className="grid grid-cols-2 gap-2"><label className="text-xs font-semibold text-slate-600">Status<select value={filters.status} onChange={event => setFilters({ ...filters, status: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-2 text-xs"><option value="all">Todos</option><option value="new">Novos</option><option value="reviewed">Revisados</option><option value="qualified">Qualificados</option><option value="imported">No CRM</option></select></label><label className="text-xs font-semibold text-slate-600">Compatibilidade<select value={filters.fit} onChange={event => setFilters({ ...filters, fit: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-2 text-xs"><option value="all">Todas</option><option value="high">Alta</option><option value="medium">Média</option><option value="low">Baixa</option></select></label></div>
-            <div className="grid grid-cols-[80px_1fr] gap-2"><input value={filters.state} onChange={event => setFilters({ ...filters, state: event.target.value.toUpperCase().slice(0, 2) })} placeholder="UF" className="rounded-lg border border-slate-300 px-3 py-2 text-xs" /><input value={filters.segment} onChange={event => setFilters({ ...filters, segment: event.target.value })} placeholder="Filtrar segmento" className="rounded-lg border border-slate-300 px-3 py-2 text-xs" /></div>
-          </div><div className="mt-4 rounded-xl bg-slate-950 p-4 text-white"><div className="flex items-center justify-between"><span className="text-xs text-slate-300">Elegíveis para o rascunho</span>{previewing && <Loader2 className="h-4 w-4 animate-spin" />}</div><strong className="mt-1 block text-3xl">{preview.eligibleCount.toLocaleString('pt-BR')}</strong><div className="mt-3 space-y-1 text-[11px] text-slate-400"><p>{preview.totalWithEmail.toLocaleString('pt-BR')} registros com e-mail</p><p>{preview.duplicateCount.toLocaleString('pt-BR')} duplicados removidos</p><p>{preview.invalidCount.toLocaleString('pt-BR')} endereços inválidos</p><p>{preview.suppressedCount.toLocaleString('pt-BR')} descadastrados ou bloqueados</p></div></div></div>
+            <label className="block text-xs font-semibold text-slate-600">E-mail de teste <span className="font-normal text-slate-400">(opcional)</span><input type="email" value={form.testRecipientEmail} onChange={event => setForm({ ...form, testRecipientEmail: event.target.value })} placeholder="seu-email@exemplo.com" className="mt-1 w-full rounded-lg border border-indigo-300 px-3 py-2 text-sm outline-none focus:border-indigo-500" /><span className="mt-1 block font-normal text-indigo-700">Preenchido, envia somente para este endereço e ignora os filtros.</span></label>
+            <fieldset disabled={hasTestRecipient} className={hasTestRecipient ? 'space-y-3 opacity-50' : 'space-y-3'}>
+              <label className="block text-xs font-semibold text-slate-600">Origem<select value={filters.origin} onChange={event => setFilters({ ...filters, origin: event.target.value as AudienceFilters['origin'] })} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"><option value="all">Toda a base</option><option value="spreadsheet">Base importada</option><option value="search">Empresas pesquisadas</option></select></label>
+              <div className="grid grid-cols-2 gap-2"><label className="text-xs font-semibold text-slate-600">Status<select value={filters.status} onChange={event => setFilters({ ...filters, status: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-2 text-xs"><option value="all">Todos</option><option value="new">Novos</option><option value="reviewed">Revisados</option><option value="qualified">Qualificados</option><option value="imported">No CRM</option></select></label><label className="text-xs font-semibold text-slate-600">Compatibilidade<select value={filters.fit} onChange={event => setFilters({ ...filters, fit: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-2 text-xs"><option value="all">Todas</option><option value="high">Alta</option><option value="medium">Média</option><option value="low">Baixa</option></select></label></div>
+              <div className="grid grid-cols-[80px_1fr] gap-2"><input value={filters.state} onChange={event => setFilters({ ...filters, state: event.target.value.toUpperCase().slice(0, 2) })} placeholder="UF" className="rounded-lg border border-slate-300 px-3 py-2 text-xs" /><input value={filters.segment} onChange={event => setFilters({ ...filters, segment: event.target.value })} placeholder="Filtrar segmento" className="rounded-lg border border-slate-300 px-3 py-2 text-xs" /></div>
+            </fieldset>
+          </div><div className="mt-4 rounded-xl bg-slate-950 p-4 text-white"><div className="flex items-center justify-between"><span className="text-xs text-slate-300">{hasTestRecipient ? 'Destinatário de teste' : 'Elegíveis para o rascunho'}</span>{previewing && <Loader2 className="h-4 w-4 animate-spin" />}</div><strong className="mt-1 block text-3xl">{preview.eligibleCount.toLocaleString('pt-BR')}</strong><div className="mt-3 space-y-1 text-[11px] text-slate-400">{hasTestRecipient ? <p>{validTestRecipient ? form.testRecipientEmail.trim() : 'Informe um endereço de e-mail válido'}</p> : <><p>{preview.totalWithEmail.toLocaleString('pt-BR')} registros com e-mail</p><p>{preview.duplicateCount.toLocaleString('pt-BR')} duplicados removidos</p><p>{preview.invalidCount.toLocaleString('pt-BR')} endereços inválidos</p><p>{preview.suppressedCount.toLocaleString('pt-BR')} descadastrados ou bloqueados</p></>}</div></div></div>
           <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4"><div className="flex items-center gap-2 text-sm font-bold text-emerald-900"><ShieldCheck className="h-4 w-4" />Conformidade</div><div className="mt-3 space-y-3">
             <label className="block text-xs font-semibold text-emerald-900">Base legal<select value={form.legalBasis} onChange={event => setForm({ ...form, legalBasis: event.target.value })} className="mt-1 w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs"><option value="legitimate_interest">Legítimo interesse</option><option value="consent">Consentimento</option></select></label>
             <label className="block text-xs font-semibold text-emerald-900">Finalidade<textarea value={form.processingPurpose} onChange={event => setForm({ ...form, processingPurpose: event.target.value })} rows={2} className="mt-1 w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs font-normal" /></label>
