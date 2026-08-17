@@ -146,13 +146,17 @@ const getEmailAudiencePreview = async (executor: any, businessId: string, filter
   };
 };
 
-const buildEmailHtml = (textBody: string) => {
+type EmailVisualStyle = 'simple' | 'institutional' | 'cta';
+
+const buildEmailHtml = (textBody: string, visualStyle: EmailVisualStyle, ctaText: string, ctaUrl: string) => {
   const paragraphs = textBody
     .split(/\n{2,}/)
     .filter(Boolean)
     .map(paragraph => `<p style="margin:0 0 18px 0;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:24px;color:#1f2937">${escapeHtml(paragraph).replace(/\n/g, '<br>')}</p>`)
     .join('');
-  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center"><table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px"><tr><td style="padding:0;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:24px;color:#1f2937">${paragraphs}</td></tr></table></td></tr></table>`;
+  const accent = visualStyle === 'simple' ? '' : `<tr><td height="4" bgcolor="#4f46e5" style="height:4px;line-height:4px;font-size:0">&nbsp;</td></tr>`;
+  const cta = visualStyle === 'cta' ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="#4f46e5" style="border-radius:4px"><a href="${escapeHtml(ctaUrl)}" style="display:inline-block;padding:12px 20px;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;line-height:18px;color:#ffffff;text-decoration:none">${escapeHtml(ctaText)}</a></td></tr></table><div style="height:22px;line-height:22px;font-size:0">&nbsp;</div>` : '';
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center"><table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px">${accent}<tr><td style="padding:${visualStyle === 'simple' ? '0' : '24px 0 0 0'};font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:24px;color:#1f2937">${paragraphs}${cta}</td></tr></table></td></tr></table>`;
 };
 
 prospectingRouter.get('/email/provider-status', requireAuth, ensureBusinessOwnership, async (_req: any, res) => {
@@ -367,6 +371,9 @@ prospectingRouter.post('/email/campaigns', requireAuth, ensureBusinessOwnership,
     const balanceTestReference = String(req.body?.balanceTestReference || '').trim().slice(0, 2000);
     const filters = parseEmailAudienceFilters(req.body?.audienceFilters || {});
     const testRecipientEmail = String(req.body?.testRecipientEmail || '').trim().toLowerCase().slice(0, 250);
+    const emailStyle: EmailVisualStyle = ['institutional', 'cta'].includes(String(req.body?.emailStyle)) ? String(req.body.emailStyle) as EmailVisualStyle : 'simple';
+    const ctaText = String(req.body?.ctaText || '').trim().slice(0, 80);
+    const ctaUrl = String(req.body?.ctaUrl || '').trim().slice(0, 2000);
     if (!name || !subject || textBody.length < 40 || !senderName) {
       return res.status(400).json({ error: 'Nome, remetente, assunto e uma mensagem com pelo menos 40 caracteres são obrigatórios.' });
     }
@@ -378,6 +385,9 @@ prospectingRouter.post('/email/campaigns', requireAuth, ensureBusinessOwnership,
     }
     if (testRecipientEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(testRecipientEmail)) {
       return res.status(400).json({ error: 'Informe um e-mail de teste válido.' });
+    }
+    if (emailStyle === 'cta' && (!ctaText || !/^https:\/\/[^\s]+$/i.test(ctaUrl))) {
+      return res.status(400).json({ error: 'Para usar botão, informe o texto e uma URL HTTPS válida.' });
     }
     if (!['legitimate_interest', 'consent'].includes(legalBasis) || processingPurpose.length < 15) {
       return res.status(400).json({ error: 'Informe a base legal e a finalidade do tratamento dos contatos.' });
@@ -405,13 +415,13 @@ prospectingRouter.post('/email/campaigns', requireAuth, ensureBusinessOwnership,
         status: 'draft',
         subject,
         previewText: previewText || null,
-        htmlBody: buildEmailHtml(textBody),
+        htmlBody: buildEmailHtml(textBody, emailStyle, ctaText, ctaUrl),
         textBody,
         senderName,
         senderEmail,
         replyToEmail: replyToEmail || null,
         audienceFilters: testRecipientEmail ? { ...filters, mode: 'test', testRecipientEmail } : filters,
-        templateVariables: [],
+        templateVariables: { emailStyle, ctaText: ctaText || null, ctaUrl: ctaUrl || null },
         legalBasis,
         processingPurpose,
         balanceTestReference: balanceTestReference || null,

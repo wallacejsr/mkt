@@ -372,11 +372,13 @@ function rawEmailAudienceWhere(businessId, filters, firstParameter = 1) {
   return { clause: conditions.join(' AND '), values };
 }
 
-function buildRawEmailHtml(textBody) {
+function buildRawEmailHtml(textBody, visualStyle = 'simple', ctaText = '', ctaUrl = '') {
   const paragraphs = String(textBody || '').split(/\n{2,}/).filter(Boolean)
     .map(paragraph => `<p style="margin:0 0 18px 0;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:24px;color:#1f2937">${escapeEmailHtml(paragraph).replace(/\n/g, '<br>')}</p>`)
     .join('');
-  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center"><table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px"><tr><td style="padding:0;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:24px;color:#1f2937">${paragraphs}</td></tr></table></td></tr></table>`;
+  const accent = visualStyle === 'simple' ? '' : '<tr><td height="4" bgcolor="#4f46e5" style="height:4px;line-height:4px;font-size:0">&nbsp;</td></tr>';
+  const cta = visualStyle === 'cta' ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="#4f46e5" style="border-radius:4px"><a href="${escapeEmailHtml(ctaUrl)}" style="display:inline-block;padding:12px 20px;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;line-height:18px;color:#ffffff;text-decoration:none">${escapeEmailHtml(ctaText)}</a></td></tr></table><div style="height:22px;line-height:22px;font-size:0">&nbsp;</div>` : '';
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center"><table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px">${accent}<tr><td style="padding:${visualStyle === 'simple' ? '0' : '24px 0 0 0'};font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:24px;color:#1f2937">${paragraphs}${cta}</td></tr></table></td></tr></table>`;
 }
 
 async function rawEmailAudiencePreview(executor, businessId, filters) {
@@ -1951,25 +1953,29 @@ app.post('/api/prospecting/email/campaigns', async (req, res) => {
     const balanceTestReference = String(req.body?.balanceTestReference || '').trim().slice(0, 2000);
     const filters = parseRawEmailAudienceFilters(req.body?.audienceFilters || {});
     const testRecipientEmail = String(req.body?.testRecipientEmail || '').trim().toLowerCase().slice(0, 250);
+    const emailStyle = ['institutional', 'cta'].includes(String(req.body?.emailStyle)) ? String(req.body.emailStyle) : 'simple';
+    const ctaText = String(req.body?.ctaText || '').trim().slice(0, 80);
+    const ctaUrl = String(req.body?.ctaUrl || '').trim().slice(0, 2000);
     if (!name || !subject || textBody.length < 40 || !senderName) return res.status(400).json({ error: 'Nome, remetente, assunto e uma mensagem com pelo menos 40 caracteres são obrigatórios.' });
     if (!/^[a-z0-9][a-z0-9._+-]{0,63}$/.test(senderLocalPart)) return res.status(400).json({ error: 'O endereço do remetente antes do @ é inválido.' });
     if (replyToEmail && !EMAIL_PATTERN.test(replyToEmail)) return res.status(400).json({ error: 'O e-mail de resposta é inválido.' });
     if (testRecipientEmail && !EMAIL_PATTERN.test(testRecipientEmail)) return res.status(400).json({ error: 'Informe um e-mail de teste válido.' });
+    if (emailStyle === 'cta' && (!ctaText || !/^https:\/\/[^\s]+$/i.test(ctaUrl))) return res.status(400).json({ error: 'Para usar botão, informe o texto e uma URL HTTPS válida.' });
     if (!['legitimate_interest', 'consent'].includes(legalBasis) || processingPurpose.length < 15) return res.status(400).json({ error: 'Informe a base legal e a finalidade do tratamento dos contatos.' });
     if (legalBasis === 'legitimate_interest' && balanceTestReference.length < 20) return res.status(400).json({ error: 'Registre o teste de balanceamento do legítimo interesse antes de salvar.' });
     if (req.body?.includeUnsubscribe !== true) return res.status(400).json({ error: 'O descadastramento é obrigatório em campanhas de prospecção.' });
     const domain = (await pool.query('SELECT * FROM email_sender_domains WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [authorized.business.id])).rows[0];
     if (!domain) return res.status(409).json({ error: 'Cadastre o domínio de envio antes de criar a campanha.' });
     const senderEmail = `${senderLocalPart}@${domain.domain}`;
-    const htmlBody = buildRawEmailHtml(textBody);
+    const htmlBody = buildRawEmailHtml(textBody, emailStyle, ctaText, ctaUrl);
 
     client = await pool.connect();
     await client.query('BEGIN');
     const campaign = (await client.query(
       `INSERT INTO email_campaigns
        (organization_id,business_id,created_by_user_id,name,status,subject,preview_text,html_body,text_body,sender_name,sender_email,reply_to_email,audience_filters,template_variables,legal_basis,processing_purpose,balance_test_reference,include_unsubscribe,provider)
-       VALUES ($1,$2,$3,$4,'draft',$5,$6,$7,$8,$9,$10,$11,$12,'[]'::jsonb,$13,$14,$15,true,'resend') RETURNING *`,
-      [authorized.business.organization_id, authorized.business.id, decoded.userId, name, subject, previewText || null, htmlBody, textBody, senderName, senderEmail, replyToEmail || null, JSON.stringify(testRecipientEmail ? { ...filters, mode: 'test', testRecipientEmail } : filters), legalBasis, processingPurpose, balanceTestReference || null]
+       VALUES ($1,$2,$3,$4,'draft',$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,true,'resend') RETURNING *`,
+      [authorized.business.organization_id, authorized.business.id, decoded.userId, name, subject, previewText || null, htmlBody, textBody, senderName, senderEmail, replyToEmail || null, JSON.stringify(testRecipientEmail ? { ...filters, mode: 'test', testRecipientEmail } : filters), JSON.stringify({ emailStyle, ctaText: ctaText || null, ctaUrl: ctaUrl || null }), legalBasis, processingPurpose, balanceTestReference || null]
     )).rows[0];
     if (testRecipientEmail) {
       await client.query(
