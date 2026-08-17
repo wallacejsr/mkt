@@ -181,6 +181,39 @@ export async function createSendingDomain(domainValue: unknown, regionValue: unk
   return mapDomain(payload);
 }
 
+export async function findSendingDomain(domainValue: unknown) {
+  const domain = normalizeSendingDomain(domainValue);
+  let after = '';
+
+  for (let page = 0; page < 100; page += 1) {
+    const query = new URLSearchParams({ limit: '100' });
+    if (after) query.set('after', after);
+    const payload = await resendRequest(`/domains?${query.toString()}`);
+    const domains = Array.isArray(payload?.data) ? payload.data : [];
+    const match = domains.find((item: any) => String(item?.name || '').trim().toLowerCase() === domain);
+    if (match?.id) return getSendingDomain(String(match.id));
+    if (!payload?.has_more || !domains.length) return null;
+    after = String(domains.at(-1)?.id || '');
+    if (!after) return null;
+  }
+
+  throw new Error('A listagem de domínios da Resend excedeu o limite de segurança.');
+}
+
+export async function createOrAdoptSendingDomain(domainValue: unknown, regionValue: unknown = 'sa-east-1') {
+  const existing = await findSendingDomain(domainValue);
+  if (existing) return { ...existing, adopted: true };
+
+  try {
+    return { ...(await createSendingDomain(domainValue, regionValue)), adopted: false };
+  } catch (error) {
+    // Covers a manual/concurrent creation between the list and create requests.
+    const concurrentlyCreated = await findSendingDomain(domainValue);
+    if (concurrentlyCreated) return { ...concurrentlyCreated, adopted: true };
+    throw error;
+  }
+}
+
 export async function getSendingDomain(providerDomainId: string) {
   if (!providerDomainId?.trim()) throw new Error('Identificador do domínio no provedor não informado.');
   return mapDomain(await resendRequest(`/domains/${encodeURIComponent(providerDomainId)}`));

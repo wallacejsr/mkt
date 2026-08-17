@@ -209,7 +209,7 @@ export function EmailCampaignWorkspace() {
           <div className="mt-4 flex max-w-xl flex-col gap-2 sm:flex-row">
             <input value={domainName} onChange={event => setDomainName(event.target.value)} placeholder="mail.suaempresa.com.br" className="flex-1 rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-indigo-500" />
             <button onClick={createDomain} disabled={domainBusy || !domainName.trim()} className="flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white disabled:opacity-50">
-              {domainBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe2 className="h-4 w-4" />}Cadastrar domínio
+              {domainBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe2 className="h-4 w-4" />}Cadastrar ou sincronizar
             </button>
           </div>
           {domainError && <p className="mt-3 text-sm font-medium text-rose-600">{domainError}</p>}

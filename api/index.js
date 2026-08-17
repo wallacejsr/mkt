@@ -198,6 +198,35 @@ async function createResendDomain(domainValue, regionValue = 'sa-east-1') {
   }));
 }
 
+async function findResendDomain(domainValue) {
+  const domain = normalizeSendingDomain(domainValue);
+  let after = '';
+  for (let page = 0; page < 100; page += 1) {
+    const query = new URLSearchParams({ limit: '100' });
+    if (after) query.set('after', after);
+    const payload = await resendDomainRequest(`/domains?${query.toString()}`);
+    const domains = Array.isArray(payload.data) ? payload.data : [];
+    const match = domains.find(item => String(item?.name || '').trim().toLowerCase() === domain);
+    if (match?.id) return getResendDomain(String(match.id));
+    if (!payload.has_more || !domains.length) return null;
+    after = String(domains.at(-1)?.id || '');
+    if (!after) return null;
+  }
+  throw new Error('A listagem de dominios da Resend excedeu o limite de seguranca.');
+}
+
+async function createOrAdoptResendDomain(domainValue, regionValue = 'sa-east-1') {
+  const existing = await findResendDomain(domainValue);
+  if (existing) return { ...existing, adopted: true };
+  try {
+    return { ...(await createResendDomain(domainValue, regionValue)), adopted: false };
+  } catch (error) {
+    const concurrentlyCreated = await findResendDomain(domainValue);
+    if (concurrentlyCreated) return { ...concurrentlyCreated, adopted: true };
+    throw error;
+  }
+}
+
 async function getResendDomain(providerDomainId) {
   return mapResendDomain(await resendDomainRequest(`/domains/${encodeURIComponent(providerDomainId)}`));
 }
@@ -1740,7 +1769,14 @@ app.post('/api/prospecting/email/domain', async (req, res) => {
     )).rows[0];
     if (existing) return res.status(409).json({ error: 'Este domínio já está cadastrado para a empresa.' });
 
-    const providerDomain = await createResendDomain(domainName, req.body?.region || 'sa-east-1');
+    const providerDomain = await createOrAdoptResendDomain(domainName, req.body?.region || 'sa-east-1');
+    const providerLink = (await pool.query(
+      'SELECT id,business_id FROM email_sender_domains WHERE provider=$1 AND provider_domain_id=$2 LIMIT 1',
+      [providerDomain.provider, providerDomain.providerDomainId]
+    )).rows[0];
+    if (providerLink && providerLink.business_id !== authorized.business.id) {
+      return res.status(409).json({ error: 'Este dominio da Resend ja esta vinculado a outra empresa.' });
+    }
     const decoded = verifyToken(req);
     const saved = (await pool.query(
       `INSERT INTO email_sender_domains
@@ -1752,7 +1788,9 @@ app.post('/api/prospecting/email/domain', async (req, res) => {
         JSON.stringify(providerDomain.records), providerDomain.spfStatus, providerDomain.dkimStatus,
       ]
     )).rows[0];
-    res.status(201).json({ domain: sendingDomainForClient(saved) });
+    res.status(providerDomain.adopted ? 200 : 201).json({
+      domain: sendingDomainForClient(saved), adopted: providerDomain.adopted,
+    });
   } catch (e) {
     if (e.code === 'EMAIL_DOMAIN_VALIDATION') return res.status(400).json({ error: e.message });
     if (e.code === 'EMAIL_PROVIDER_NOT_CONFIGURED') return res.status(503).json({ error: e.message, missingVariables: e.missingVariables });

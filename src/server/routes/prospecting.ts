@@ -20,7 +20,7 @@ import {
   sendEmail,
   EmailProviderConfigurationError,
   EmailDomainValidationError,
-  createSendingDomain,
+  createOrAdoptSendingDomain,
   getSendingDomain,
   verifySendingDomain,
   checkDmarc,
@@ -199,7 +199,16 @@ prospectingRouter.post('/email/domain', requireAuth, ensureBusinessOwnership, as
       .limit(1);
     if (existing) return res.status(409).json({ error: 'Este domínio já está cadastrado para a empresa.' });
 
-    const providerDomain = await createSendingDomain(domainName, region);
+    const providerDomain = await createOrAdoptSendingDomain(domainName, region);
+    const [providerLink] = await db.select({
+      id: emailSenderDomains.id,
+      businessId: emailSenderDomains.businessId,
+    }).from(emailSenderDomains)
+      .where(eq(emailSenderDomains.providerDomainId, providerDomain.providerDomainId))
+      .limit(1);
+    if (providerLink && providerLink.businessId !== req.business.id) {
+      return res.status(409).json({ error: 'Este domínio da Resend já está vinculado a outra empresa.' });
+    }
     const [saved] = await db.insert(emailSenderDomains).values({
       organizationId: req.business.organizationId,
       businessId: req.business.id,
@@ -213,7 +222,7 @@ prospectingRouter.post('/email/domain', requireAuth, ensureBusinessOwnership, as
       spfStatus: providerDomain.spfStatus,
       dkimStatus: providerDomain.dkimStatus,
     }).returning();
-    res.status(201).json({ domain: saved });
+    res.status(providerDomain.adopted ? 200 : 201).json({ domain: saved, adopted: providerDomain.adopted });
   } catch (error: any) {
     if (error instanceof EmailDomainValidationError) return res.status(400).json({ error: error.message });
     if (error instanceof EmailProviderConfigurationError) {
