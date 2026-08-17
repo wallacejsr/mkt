@@ -18,7 +18,11 @@ import { assistantRouter } from './routes/assistant';
 
 export const app = express();
 
-app.use(express.json());
+app.use(express.json({
+  verify: (req: any, _res, buffer) => {
+    if (req.originalUrl?.startsWith('/api/prospecting/email/webhooks/')) req.rawBody = buffer.toString('utf8');
+  },
+}));
 
 // API ROUTES
 app.get("/api/health", (req, res) => {

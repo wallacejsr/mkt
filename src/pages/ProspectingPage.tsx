@@ -30,6 +30,7 @@ import { NewSearchModal } from '../components/prospecting/NewSearchModal';
 import { ProspectDrawer, ProspectDetail } from '../components/prospecting/ProspectDrawer';
 import { ApproachModal } from '../components/prospecting/ApproachModal';
 import { SpreadsheetImportModal } from '../components/prospecting/SpreadsheetImportModal';
+import { EmailCampaignWorkspace } from '../components/prospecting/EmailCampaignWorkspace';
 
 interface SearchHistoryItem {
   id: string;
@@ -50,7 +51,7 @@ export function ProspectingPage() {
   const [searches, setSearches] = useState<SearchHistoryItem[]>([]);
   const [prospects, setProspects] = useState<ProspectDetail[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'search' | 'spreadsheet'>('search');
+  const [activeTab, setActiveTab] = useState<'search' | 'spreadsheet' | 'email'>('search');
   const [isSpreadsheetModalOpen, setIsSpreadsheetModalOpen] = useState(false);
   const [filterState, setFilterState] = useState('');
   const [filterSegment, setFilterSegment] = useState('');
@@ -96,6 +97,10 @@ export function ProspectingPage() {
   }, [activeTab, filterEmail, filterPhone, filterWebsite, filterStatus, filterFit, filterState, filterSegment, searchQuery]);
 
   const fetchData = async () => {
+    if (activeTab === 'email') {
+      setLoading(false);
+      return;
+    }
     try {
       setLoading(true);
       // Fetch recent searches
@@ -277,13 +282,13 @@ export function ProspectingPage() {
           </p>
         </div>
 
-        <button
+        {activeTab !== 'email' && <button
           onClick={() => activeTab === 'search' ? setIsSearchModalOpen(true) : setIsSpreadsheetModalOpen(true)}
           className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-semibold text-sm shadow-sm transition-colors flex items-center gap-2 self-start md:self-auto"
         >
           {activeTab === 'search' ? <Plus className="w-4 h-4" /> : <Upload className="w-4 h-4" />}
           {activeTab === 'search' ? 'Nova busca' : 'Importar planilha'}
-        </button>
+        </button>}
       </div>
 
       <div className="inline-flex rounded-xl border border-slate-200 bg-white p-1 shadow-2xs">
@@ -299,10 +304,16 @@ export function ProspectingPage() {
         >
           <FileSpreadsheet className="h-4 w-4" /> Base importada
         </button>
+        <button
+          onClick={() => setActiveTab('email')}
+          className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${activeTab === 'email' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+        >
+          <Mail className="h-4 w-4" /> Campanhas de e-mail
+        </button>
       </div>
 
       {/* Main Content */}
-      {activeTab === 'search' && searches.length === 0 && !loading && prospects.length === 0 ? (
+      {activeTab === 'email' ? <EmailCampaignWorkspace /> : activeTab === 'search' && searches.length === 0 && !loading && prospects.length === 0 ? (
         /* Empty State */
         <div className="bg-white border border-slate-200 rounded-2xl p-12 text-center max-w-2xl mx-auto my-8 shadow-2xs">
           <div className="w-16 h-16 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-5">

@@ -6,6 +6,8 @@ const express = require('express');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const nodeCrypto = require('crypto');
+const dnsPromises = require('dns').promises;
 
 const app = express();
 
@@ -17,7 +19,12 @@ app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return res.status(200).end();
   next();
 });
-app.use(express.json({ limit: '4mb' }));
+app.use(express.json({
+  limit: '4mb',
+  verify: (req, _res, buffer) => {
+    if (req.originalUrl?.startsWith('/api/prospecting/email/webhooks/')) req.rawBody = buffer.toString('utf8');
+  },
+}));
 
 const JWT_SECRET = process.env.JWT_SECRET || 'mkt-agro-bw-secret-key-2026';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
@@ -43,6 +50,632 @@ function verifyToken(req) {
   if (!h || !h.startsWith('Bearer ')) return null;
   try { return jwt.verify(h.split('Bearer ')[1], JWT_SECRET); }
   catch { return null; }
+}
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const DOMAIN_PATTERN = /^(?=.{4,253}$)(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+const RESEND_REGIONS = new Set(['us-east-1', 'eu-west-1', 'sa-east-1', 'ap-northeast-1']);
+function emailEnv(name) { return String(process.env[name] || '').trim(); }
+function getResendProviderStatus() {
+  const apiKey = emailEnv('RESEND_API_KEY');
+  const fromAddress = emailEnv('EMAIL_FROM_ADDRESS');
+  const fromName = emailEnv('EMAIL_FROM_NAME');
+  const replyTo = emailEnv('EMAIL_REPLY_TO');
+  const missingVariables = [];
+  if (!apiKey) missingVariables.push('RESEND_API_KEY');
+  if (!fromAddress || !EMAIL_PATTERN.test(fromAddress)) missingVariables.push('EMAIL_FROM_ADDRESS');
+  if (!fromName) missingVariables.push('EMAIL_FROM_NAME');
+  if (replyTo && !EMAIL_PATTERN.test(replyTo)) missingVariables.push('EMAIL_REPLY_TO');
+  return {
+    provider: 'resend', apiConfigured: Boolean(apiKey), webhookConfigured: Boolean(emailEnv('RESEND_WEBHOOK_SECRET')),
+    configured: missingVariables.length === 0, missingVariables,
+    fromName: fromName || null, fromAddress: fromAddress || null, replyTo: replyTo || null,
+    sendingDomain: fromAddress.includes('@') ? fromAddress.split('@')[1].toLowerCase() : null,
+  };
+}
+
+async function sendWithResend(input) {
+  const status = getResendProviderStatus();
+  const fromAddress = String(input.fromAddress || status.fromAddress || '').trim().toLowerCase();
+  const fromName = String(input.fromName || status.fromName || '').trim();
+  const replyTo = String(input.replyTo || status.replyTo || '').trim().toLowerCase();
+  const missingVariables = [];
+  if (!status.apiConfigured) missingVariables.push('RESEND_API_KEY');
+  if (!EMAIL_PATTERN.test(fromAddress)) missingVariables.push('EMAIL_FROM_ADDRESS');
+  if (!fromName) missingVariables.push('EMAIL_FROM_NAME');
+  if (replyTo && !EMAIL_PATTERN.test(replyTo)) missingVariables.push('EMAIL_REPLY_TO');
+  if (missingVariables.length) {
+    const error = new Error(`Configuração de e-mail incompleta: ${missingVariables.join(', ')}`);
+    error.code = 'EMAIL_PROVIDER_NOT_CONFIGURED';
+    error.missingVariables = missingVariables;
+    throw error;
+  }
+  if (!EMAIL_PATTERN.test(input.to)) throw new Error('Destinatário de teste inválido.');
+  if (!String(input.subject || '').trim() || !String(input.text || '').trim() || !String(input.html || '').trim()) {
+    throw new Error('Assunto e conteúdo do e-mail são obrigatórios.');
+  }
+  if (!String(input.idempotencyKey || '').trim() || String(input.idempotencyKey).length > 256) {
+    throw new Error('Chave de idempotência inválida.');
+  }
+  if (/\r|\n/.test(fromName) || /\r|\n/.test(String(input.subject || ''))) throw new Error('Cabeçalho de e-mail inválido.');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${emailEnv('RESEND_API_KEY')}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'MarketingOS/1.0',
+        'Idempotency-Key': input.idempotencyKey,
+      },
+      body: JSON.stringify({
+        from: `${fromName} <${fromAddress}>`,
+        to: [String(input.to).toLowerCase()], subject: input.subject, html: input.html, text: input.text,
+        reply_to: replyTo || undefined,
+        headers: input.headers || undefined,
+      }),
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload.id) throw new Error(payload.message || payload.error?.message || `Resend respondeu com status ${response.status}.`);
+    return { provider: 'resend', messageId: String(payload.id) };
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('Tempo limite excedido ao conectar com o Resend.');
+    throw error;
+  } finally { clearTimeout(timeout); }
+}
+
+function normalizeSendingDomain(value) {
+  const domain = String(value || '').trim().toLowerCase().replace(/\.$/, '');
+  if (!DOMAIN_PATTERN.test(domain)) {
+    const error = new Error('Informe um dominio valido, sem http, caminho ou e-mail. Exemplo: mail.suaempresa.com.br.');
+    error.code = 'EMAIL_DOMAIN_VALIDATION';
+    throw error;
+  }
+  return domain;
+}
+
+async function resendDomainRequest(path, init = {}) {
+  const apiKey = emailEnv('RESEND_API_KEY');
+  if (!apiKey) {
+    const error = new Error('Configuração de e-mail incompleta: RESEND_API_KEY');
+    error.code = 'EMAIL_PROVIDER_NOT_CONFIGURED';
+    error.missingVariables = ['RESEND_API_KEY'];
+    throw error;
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(`https://api.resend.com${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'MarketingOS/1.0',
+        ...(init.headers || {}),
+      },
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.message || payload.error?.message || `Resend respondeu com status ${response.status}.`);
+    return payload;
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('Tempo limite excedido ao conectar com o Resend.');
+    throw error;
+  } finally { clearTimeout(timeout); }
+}
+
+function summarizeDnsRecords(records, kind) {
+  const statuses = records.filter(item => String(item.record || '').toUpperCase() === kind).map(item => String(item.status || 'not_started'));
+  if (!statuses.length) return 'not_started';
+  if (statuses.every(status => status === 'verified')) return 'verified';
+  if (statuses.some(status => ['failed', 'temporary_failure'].includes(status))) return 'failed';
+  if (statuses.some(status => status === 'verified')) return 'partially_verified';
+  if (statuses.some(status => status === 'pending')) return 'pending';
+  return statuses[0];
+}
+
+function mapResendDomain(payload) {
+  const records = Array.isArray(payload.records) ? payload.records : [];
+  return {
+    provider: 'resend', providerDomainId: String(payload.id || ''), domain: normalizeSendingDomain(payload.name),
+    region: RESEND_REGIONS.has(payload.region) ? payload.region : 'sa-east-1', status: String(payload.status || 'not_started'), records,
+    spfStatus: summarizeDnsRecords(records, 'SPF'), dkimStatus: summarizeDnsRecords(records, 'DKIM'),
+  };
+}
+
+async function createResendDomain(domainValue, regionValue = 'sa-east-1') {
+  const domain = normalizeSendingDomain(domainValue);
+  const region = String(regionValue || 'sa-east-1');
+  if (!RESEND_REGIONS.has(region)) {
+    const error = new Error('Regiao de envio invalida.');
+    error.code = 'EMAIL_DOMAIN_VALIDATION';
+    throw error;
+  }
+  return mapResendDomain(await resendDomainRequest('/domains', {
+    method: 'POST', body: JSON.stringify({ name: domain, region, capabilities: { sending: 'enabled', receiving: 'disabled' } }),
+  }));
+}
+
+async function getResendDomain(providerDomainId) {
+  return mapResendDomain(await resendDomainRequest(`/domains/${encodeURIComponent(providerDomainId)}`));
+}
+
+async function verifyResendDomain(providerDomainId) {
+  await resendDomainRequest(`/domains/${encodeURIComponent(providerDomainId)}/verify`, { method: 'POST' });
+  return getResendDomain(providerDomainId);
+}
+
+async function checkDomainDmarc(domainValue) {
+  const domain = normalizeSendingDomain(domainValue);
+  const labels = domain.split('.');
+  const commonSecondLevel = new Set(['com', 'net', 'org', 'co', 'gov', 'edu', 'agr']);
+  const rootLabelCount = labels.at(-1)?.length === 2 && commonSecondLevel.has(labels.at(-2) || '') ? 3 : 2;
+  const organizationalDomain = labels.length > rootLabelCount ? labels.slice(-rootLabelCount).join('.') : domain;
+  const candidates = [...new Set([domain, organizationalDomain])];
+  let lastLookupError = false;
+  for (const candidate of candidates) {
+    const checkedHost = `_dmarc.${candidate}`;
+    try {
+      const answers = await dnsPromises.resolveTxt(checkedHost);
+      const records = answers.map(parts => parts.join('')).filter(Boolean);
+      const dmarc = records.find(record => /^v=DMARC1\s*;/i.test(record));
+      if (dmarc) return { status: 'verified', record: dmarc, checkedHost };
+      if (records.length) return { status: 'invalid', record: records.join(' | '), checkedHost };
+    } catch (error) {
+      if (!['ENOTFOUND', 'ENODATA', 'ESERVFAIL'].includes(error.code)) lastLookupError = true;
+    }
+  }
+  return { status: lastLookupError ? 'lookup_failed' : 'missing', record: null, checkedHost: `_dmarc.${organizationalDomain}` };
+}
+
+async function ensureEmailSenderDomainSchema(pool) {
+  await pool.query(`CREATE TABLE IF NOT EXISTS email_sender_domains (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), organization_id uuid NOT NULL REFERENCES organizations(id),
+    business_id uuid NOT NULL REFERENCES businesses(id), created_by_user_id uuid REFERENCES users(id),
+    provider text NOT NULL DEFAULT 'resend', domain text NOT NULL, provider_domain_id text NOT NULL,
+    region text NOT NULL DEFAULT 'sa-east-1', status text NOT NULL DEFAULT 'not_started',
+    dns_records jsonb NOT NULL DEFAULT '[]'::jsonb, spf_status text NOT NULL DEFAULT 'not_started',
+    dkim_status text NOT NULL DEFAULT 'not_started', dmarc_status text NOT NULL DEFAULT 'missing', dmarc_record text,
+    last_checked_at timestamp, verified_at timestamp, created_at timestamp DEFAULT now(), updated_at timestamp DEFAULT now()
+  )`);
+  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS email_sender_domains_business_domain_uidx ON email_sender_domains (business_id, domain)');
+  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS email_sender_domains_provider_domain_uidx ON email_sender_domains (provider, provider_domain_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS email_sender_domains_business_status_idx ON email_sender_domains (business_id, status)');
+}
+
+async function ensureEmailCampaignSchema(pool) {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_campaigns (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), organization_id uuid NOT NULL REFERENCES organizations(id),
+      business_id uuid NOT NULL REFERENCES businesses(id), created_by_user_id uuid REFERENCES users(id),
+      name text NOT NULL, status text NOT NULL DEFAULT 'draft', subject text NOT NULL, preview_text text,
+      html_body text, text_body text NOT NULL, sender_name text NOT NULL, sender_email text NOT NULL, reply_to_email text,
+      audience_filters jsonb DEFAULT '{}'::jsonb, template_variables jsonb DEFAULT '[]'::jsonb,
+      legal_basis text, processing_purpose text, balance_test_reference text, include_unsubscribe boolean NOT NULL DEFAULT true,
+      provider text, provider_batch_id text, total_recipients integer NOT NULL DEFAULT 0, queued_count integer NOT NULL DEFAULT 0,
+      sent_count integer NOT NULL DEFAULT 0, delivered_count integer NOT NULL DEFAULT 0, opened_count integer NOT NULL DEFAULT 0,
+      clicked_count integer NOT NULL DEFAULT 0, bounced_count integer NOT NULL DEFAULT 0, complained_count integer NOT NULL DEFAULT 0,
+      unsubscribed_count integer NOT NULL DEFAULT 0, failed_count integer NOT NULL DEFAULT 0,
+      scheduled_at timestamp, started_at timestamp, completed_at timestamp, created_at timestamp DEFAULT now(), updated_at timestamp DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS email_campaigns_business_status_idx ON email_campaigns (business_id, status);
+    CREATE TABLE IF NOT EXISTS email_campaign_recipients (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), organization_id uuid NOT NULL REFERENCES organizations(id),
+      business_id uuid NOT NULL REFERENCES businesses(id), campaign_id uuid NOT NULL REFERENCES email_campaigns(id) ON DELETE CASCADE,
+      prospect_id uuid REFERENCES prospects(id) ON DELETE SET NULL, lead_id uuid REFERENCES leads(id) ON DELETE SET NULL,
+      email text NOT NULL, normalized_email text NOT NULL, recipient_name text, company_name text,
+      personalization jsonb DEFAULT '{}'::jsonb, status text NOT NULL DEFAULT 'queued', provider_message_id text, last_error text,
+      attempt_count integer NOT NULL DEFAULT 0, unsubscribe_token uuid NOT NULL DEFAULT gen_random_uuid(), scheduled_at timestamp,
+      last_attempt_at timestamp, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp,
+      bounced_at timestamp, complained_at timestamp, unsubscribed_at timestamp, created_at timestamp DEFAULT now(), updated_at timestamp DEFAULT now()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS email_recipients_campaign_email_uidx ON email_campaign_recipients (campaign_id, normalized_email);
+    CREATE UNIQUE INDEX IF NOT EXISTS email_recipients_unsubscribe_token_uidx ON email_campaign_recipients (unsubscribe_token);
+    CREATE INDEX IF NOT EXISTS email_recipients_provider_message_idx ON email_campaign_recipients (provider_message_id);
+    CREATE TABLE IF NOT EXISTS email_campaign_events (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), organization_id uuid NOT NULL REFERENCES organizations(id),
+      business_id uuid NOT NULL REFERENCES businesses(id), campaign_id uuid NOT NULL REFERENCES email_campaigns(id) ON DELETE CASCADE,
+      recipient_id uuid REFERENCES email_campaign_recipients(id) ON DELETE CASCADE, provider text NOT NULL,
+      provider_event_id text, event_type text NOT NULL, payload jsonb DEFAULT '{}'::jsonb,
+      occurred_at timestamp NOT NULL, created_at timestamp DEFAULT now()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS email_events_provider_event_uidx ON email_campaign_events (provider,provider_event_id) WHERE provider_event_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS email_events_campaign_occurred_idx ON email_campaign_events (campaign_id,occurred_at);
+    CREATE TABLE IF NOT EXISTS email_unsubscribes (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), organization_id uuid NOT NULL REFERENCES organizations(id),
+      business_id uuid NOT NULL REFERENCES businesses(id), campaign_id uuid REFERENCES email_campaigns(id) ON DELETE SET NULL,
+      recipient_id uuid REFERENCES email_campaign_recipients(id) ON DELETE SET NULL, email text NOT NULL, normalized_email text NOT NULL,
+      reason text, source text NOT NULL DEFAULT 'link', unsubscribed_at timestamp NOT NULL DEFAULT now(), created_at timestamp DEFAULT now()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS email_unsubscribes_business_email_uidx ON email_unsubscribes (business_id, normalized_email);
+    CREATE TABLE IF NOT EXISTS email_suppressions (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), organization_id uuid NOT NULL REFERENCES organizations(id),
+      business_id uuid NOT NULL REFERENCES businesses(id), source_campaign_id uuid REFERENCES email_campaigns(id) ON DELETE SET NULL,
+      source_recipient_id uuid REFERENCES email_campaign_recipients(id) ON DELETE SET NULL, email text NOT NULL, normalized_email text NOT NULL,
+      reason text NOT NULL, provider text, provider_reference text, details jsonb DEFAULT '{}'::jsonb, active boolean NOT NULL DEFAULT true,
+      suppressed_at timestamp NOT NULL DEFAULT now(), created_at timestamp DEFAULT now(), updated_at timestamp DEFAULT now()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS email_suppressions_business_email_uidx ON email_suppressions (business_id, normalized_email);
+    CREATE TABLE IF NOT EXISTS email_dispatch_worker_state (
+      id text PRIMARY KEY DEFAULT 'main',status text NOT NULL DEFAULT 'idle',last_started_at timestamp,last_completed_at timestamp,
+      last_error text,campaigns_processed integer NOT NULL DEFAULT 0,recipients_processed integer NOT NULL DEFAULT 0,
+      sent_count integer NOT NULL DEFAULT 0,failed_count integer NOT NULL DEFAULT 0,updated_at timestamp DEFAULT now()
+    );
+    INSERT INTO email_dispatch_worker_state (id,status) VALUES ('main','idle') ON CONFLICT (id) DO NOTHING;
+  `);
+  await pool.query(`
+    ALTER TABLE email_campaigns ADD COLUMN IF NOT EXISTS send_rate_per_minute integer NOT NULL DEFAULT 30;
+    ALTER TABLE email_campaigns ADD COLUMN IF NOT EXISTS daily_limit integer NOT NULL DEFAULT 500;
+    ALTER TABLE email_campaigns ADD COLUMN IF NOT EXISTS batch_size integer NOT NULL DEFAULT 10;
+    ALTER TABLE email_campaigns ADD COLUMN IF NOT EXISTS last_dispatch_at timestamp;
+    ALTER TABLE email_campaigns ADD COLUMN IF NOT EXISTS paused_at timestamp;
+    ALTER TABLE email_campaigns ADD COLUMN IF NOT EXISTS cancelled_at timestamp;
+    ALTER TABLE email_campaigns ADD COLUMN IF NOT EXISTS last_error text;
+    CREATE INDEX IF NOT EXISTS email_recipients_campaign_status_attempt_idx ON email_campaign_recipients (campaign_id,status,last_attempt_at);
+    CREATE INDEX IF NOT EXISTS email_recipients_business_sent_idx ON email_campaign_recipients (business_id,sent_at);
+  `);
+}
+
+function parseRawEmailAudienceFilters(input = {}) {
+  return {
+    origin: ['search', 'spreadsheet'].includes(input.origin) ? input.origin : 'all',
+    status: ['new', 'reviewed', 'qualified', 'imported'].includes(input.status) ? input.status : 'all',
+    fit: ['high', 'medium', 'low'].includes(input.fit) ? input.fit : 'all',
+    state: String(input.state || '').trim().toUpperCase().slice(0, 2),
+    segment: String(input.segment || '').trim().slice(0, 160),
+  };
+}
+
+function rawEmailAudienceWhere(businessId, filters, firstParameter = 1) {
+  const values = [businessId];
+  const parameter = value => { values.push(value); return `$${firstParameter + values.length - 1}`; };
+  const conditions = [
+    `p.business_id=$${firstParameter}`, "p.email IS NOT NULL", "BTRIM(p.email)<>''", "COALESCE(p.status,'new')<>'disqualified'",
+  ];
+  if (filters.origin === 'spreadsheet') conditions.push("p.source_type='spreadsheet'");
+  if (filters.origin === 'search') conditions.push("COALESCE(p.source_type,'search')='search'");
+  if (filters.status !== 'all') conditions.push(`p.status=${parameter(filters.status)}`);
+  if (filters.fit !== 'all') conditions.push(`p.qualification_fit=${parameter(filters.fit)}`);
+  if (filters.state) conditions.push(`UPPER(COALESCE(p.state,''))=${parameter(filters.state)}`);
+  if (filters.segment) conditions.push(`p.segment ILIKE ${parameter(`%${filters.segment}%`)}`);
+  return { clause: conditions.join(' AND '), values };
+}
+
+async function rawEmailAudiencePreview(executor, businessId, filters) {
+  const audience = rawEmailAudienceWhere(businessId, filters);
+  const row = (await executor.query(`
+    WITH scoped AS (
+      SELECT LOWER(BTRIM(p.email)) AS normalized_email,
+             (BTRIM(p.email) ~* '^[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$') AS valid
+        FROM prospects p WHERE ${audience.clause}
+    ), valid_unique AS (SELECT DISTINCT normalized_email FROM scoped WHERE valid),
+    classified AS (
+      SELECT v.normalized_email,
+             EXISTS (SELECT 1 FROM email_unsubscribes u WHERE u.business_id=$1 AND u.normalized_email=v.normalized_email)
+             OR EXISTS (SELECT 1 FROM email_suppressions s WHERE s.business_id=$1 AND s.normalized_email=v.normalized_email AND s.active=true) AS blocked
+        FROM valid_unique v
+    )
+    SELECT (SELECT COUNT(*)::int FROM scoped) AS total_with_email,
+           (SELECT COUNT(*)::int FROM scoped WHERE NOT valid) AS invalid_count,
+           ((SELECT COUNT(*) FROM scoped WHERE valid)-(SELECT COUNT(*) FROM valid_unique))::int AS duplicate_count,
+           (SELECT COUNT(*)::int FROM classified WHERE blocked) AS suppressed_count,
+           (SELECT COUNT(*)::int FROM classified WHERE NOT blocked) AS eligible_count
+  `, audience.values)).rows[0] || {};
+  return {
+    totalWithEmail: Number(row.total_with_email || 0), invalidCount: Number(row.invalid_count || 0),
+    duplicateCount: Number(row.duplicate_count || 0), suppressedCount: Number(row.suppressed_count || 0),
+    eligibleCount: Number(row.eligible_count || 0),
+  };
+}
+
+function emailCampaignForClient(row) {
+  if (!row) return null;
+  return {
+    id: row.id, organizationId: row.organization_id, businessId: row.business_id, name: row.name, status: row.status,
+    subject: row.subject, previewText: row.preview_text, textBody: row.text_body, senderName: row.sender_name,
+    senderEmail: row.sender_email, replyToEmail: row.reply_to_email, audienceFilters: row.audience_filters || {},
+    legalBasis: row.legal_basis, processingPurpose: row.processing_purpose, includeUnsubscribe: row.include_unsubscribe,
+    totalRecipients: Number(row.total_recipients || 0), queuedCount: Number(row.queued_count || 0), sentCount: Number(row.sent_count || 0),
+    deliveredCount: Number(row.delivered_count || 0), openedCount: Number(row.opened_count || 0), clickedCount: Number(row.clicked_count || 0),
+    bouncedCount: Number(row.bounced_count || 0), complainedCount: Number(row.complained_count || 0),
+    unsubscribedCount: Number(row.unsubscribed_count || 0), failedCount: Number(row.failed_count || 0),
+    sendRatePerMinute: Number(row.send_rate_per_minute || 30), dailyLimit: Number(row.daily_limit || 500), batchSize: Number(row.batch_size || 10),
+    startedAt: row.started_at, completedAt: row.completed_at, pausedAt: row.paused_at, lastDispatchAt: row.last_dispatch_at,
+    lastError: row.last_error, createdAt: row.created_at, updatedAt: row.updated_at,
+  };
+}
+
+function dispatchAppUrl(value) {
+  const url = new URL(String(value || ''));
+  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('APP_URL inválida.');
+  if (url.protocol !== 'https:' && !['localhost', '127.0.0.1'].includes(url.hostname)) throw new Error('APP_URL deve usar HTTPS para disparos reais.');
+  return url.origin;
+}
+
+async function rawMapWithConcurrency(items, concurrency, worker) {
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (cursor < items.length) await worker(items[cursor++]);
+  }));
+}
+
+async function processRawEmailCampaignBatch(pool, campaignId, businessId, appUrlValue, maxBatchSize) {
+  const appUrl = dispatchAppUrl(appUrlValue);
+  const client = await pool.connect();
+  let campaign;
+  let recipients = [];
+  try {
+    await client.query('BEGIN');
+    campaign = (await client.query(
+      `SELECT c.*,d.status AS domain_status,d.domain AS sending_domain FROM email_campaigns c
+       LEFT JOIN LATERAL (SELECT status,domain FROM email_sender_domains WHERE business_id=c.business_id ORDER BY created_at DESC LIMIT 1) d ON true
+       WHERE c.id=$1 AND c.business_id=$2 FOR UPDATE OF c`, [campaignId, businessId]
+    )).rows[0];
+    if (!campaign) throw new Error('Campanha de e-mail não encontrada.');
+    if (campaign.status === 'scheduled') {
+      const delay = new Date(campaign.scheduled_at).getTime() - Date.now();
+      if (delay > 0) {
+        await client.query('COMMIT');
+        return { status: 'scheduled', processed: 0, sent: 0, failed: 0, throttled: true, reason: 'scheduled', nextAttemptMs: Math.min(60000, Math.max(2000, delay)) };
+      }
+      campaign.status = 'queued';
+      await client.query("UPDATE email_campaigns SET status='queued',updated_at=NOW() WHERE id=$1", [campaign.id]);
+    }
+    if (!['queued', 'sending'].includes(campaign.status)) {
+      await client.query('COMMIT');
+      return { status: campaign.status, processed: 0, sent: 0, failed: 0, throttled: false };
+    }
+    if (campaign.domain_status !== 'verified') throw new Error('O domínio de envio não está verificado.');
+    await client.query(
+      `UPDATE email_campaign_recipients SET status='queued',updated_at=NOW() WHERE campaign_id=$1 AND status='processing'
+       AND provider_message_id IS NULL AND last_attempt_at < NOW()-INTERVAL '15 minutes'`, [campaign.id]
+    );
+    const usage = (await client.query(
+      `SELECT COUNT(*) FILTER (WHERE
+                (status IN ('sent','delivered','opened','clicked') AND sent_at>=NOW()-INTERVAL '1 minute')
+                OR (status='processing' AND last_attempt_at>=NOW()-INTERVAL '1 minute')
+              )::int AS minute_count,
+              COUNT(*) FILTER (WHERE
+                (status IN ('sent','delivered','opened','clicked') AND sent_at>=date_trunc('day',NOW()))
+                OR (status='processing' AND last_attempt_at>=date_trunc('day',NOW()))
+              )::int AS day_count
+       FROM email_campaign_recipients WHERE business_id=$1`, [businessId]
+    )).rows[0];
+    const minuteAvailable = Math.max(0, Number(campaign.send_rate_per_minute || 30) - Number(usage.minute_count || 0));
+    const dayAvailable = Math.max(0, Number(campaign.daily_limit || 500) - Number(usage.day_count || 0));
+    const claimLimit = Math.min(Number(campaign.batch_size || 10), maxBatchSize || Number.MAX_SAFE_INTEGER, minuteAvailable, dayAvailable);
+    if (claimLimit <= 0) {
+      await client.query('COMMIT');
+      return { status: campaign.status, processed: 0, sent: 0, failed: 0, throttled: true, reason: dayAvailable <= 0 ? 'daily_limit' : 'minute_limit', nextAttemptMs: dayAvailable <= 0 ? 3600000 : 15000 };
+    }
+    recipients = (await client.query(
+      `WITH candidates AS (SELECT id FROM email_campaign_recipients WHERE campaign_id=$1 AND status='queued' AND attempt_count<3 ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT $2)
+       UPDATE email_campaign_recipients r SET status='processing',attempt_count=r.attempt_count+1,last_attempt_at=NOW(),updated_at=NOW()
+       FROM candidates WHERE r.id=candidates.id RETURNING r.*`, [campaign.id, claimLimit]
+    )).rows;
+    await client.query("UPDATE email_campaigns SET status='sending',started_at=COALESCE(started_at,NOW()),last_dispatch_at=NOW(),last_error=NULL,updated_at=NOW() WHERE id=$1", [campaign.id]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally { client.release(); }
+
+  let sent = 0;
+  let failed = 0;
+  await rawMapWithConcurrency(recipients, 3, async recipient => {
+    const unsubscribeUrl = `${appUrl}/api/prospecting/email/unsubscribe/${recipient.unsubscribe_token}`;
+    const html = `${campaign.html_body}<div style="margin-top:28px;padding-top:16px;border-top:1px solid #e2e8f0;font:12px Arial,sans-serif;color:#64748b">Você recebeu este contato comercial por seu endereço profissional. <a href="${unsubscribeUrl}" style="color:#4f46e5">Não quero receber novos e-mails</a>.</div>`;
+    const text = `${campaign.text_body}\n\nPara não receber novos contatos comerciais, acesse: ${unsubscribeUrl}`;
+    try {
+      const result = await sendWithResend({
+        to: recipient.email, subject: campaign.subject, html, text, fromName: campaign.sender_name,
+        fromAddress: campaign.sender_email, replyTo: campaign.reply_to_email || undefined,
+        headers: { 'List-Unsubscribe': `<${unsubscribeUrl}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' },
+        idempotencyKey: `campaign/${campaign.id}/recipient/${recipient.id}`,
+      });
+      sent++;
+      await pool.query("UPDATE email_campaign_recipients SET status='sent',provider_message_id=$1,sent_at=NOW(),last_error=NULL,updated_at=NOW() WHERE id=$2 AND campaign_id=$3", [result.messageId, recipient.id, campaign.id]);
+    } catch (error) {
+      failed++;
+      const nextStatus = Number(recipient.attempt_count || 1) >= 3 ? 'failed' : 'queued';
+      await pool.query("UPDATE email_campaign_recipients SET status=$1,last_error=$2,updated_at=NOW() WHERE id=$3 AND campaign_id=$4 AND status='processing'", [nextStatus, String(error.message || 'Falha no provedor').slice(0, 1000), recipient.id, campaign.id]);
+    }
+  });
+  const summary = (await pool.query(
+    `SELECT COUNT(*) FILTER (WHERE status='queued')::int AS queued,COUNT(*) FILTER (WHERE status='processing')::int AS processing,
+            COUNT(*) FILTER (WHERE sent_at IS NOT NULL)::int AS sent,COUNT(*) FILTER (WHERE status IN ('failed','suppressed'))::int AS failed
+     FROM email_campaign_recipients WHERE campaign_id=$1`, [campaign.id]
+  )).rows[0];
+  const completed = Number(summary.queued || 0) === 0 && Number(summary.processing || 0) === 0;
+  const status = completed ? 'completed' : 'sending';
+  await pool.query(
+    `UPDATE email_campaigns SET status=$1,queued_count=$2,sent_count=$3,failed_count=$4,
+     completed_at=CASE WHEN $1='completed' THEN NOW() ELSE completed_at END,updated_at=NOW()
+     WHERE id=$5 AND status NOT IN ('paused','cancelled')`,
+    [status, Number(summary.queued || 0), Number(summary.sent || 0), Number(summary.failed || 0), campaign.id]
+  );
+  return { status, processed: recipients.length, sent, failed, throttled: false, remaining: Number(summary.queued || 0), totalSent: Number(summary.sent || 0), totalFailed: Number(summary.failed || 0), nextAttemptMs: completed ? null : Math.max(2000, Math.ceil(60000 * recipients.length / Number(campaign.send_rate_per_minute || 30))) };
+}
+
+function verifyRawEmailWorkerAuthorization(req) {
+  const secret = emailEnv('CRON_SECRET');
+  if (secret.length < 16) { const error = new Error('CRON_SECRET deve ter pelo menos 16 caracteres.'); error.code = 'WORKER_CONFIG'; throw error; }
+  const provided = String(req.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  const expectedBytes = Buffer.from(secret);
+  const providedBytes = Buffer.from(provided);
+  if (providedBytes.length !== expectedBytes.length || !nodeCrypto.timingSafeEqual(providedBytes, expectedBytes)) {
+    const error = new Error('Worker não autorizado.'); error.code = 'WORKER_AUTH'; throw error;
+  }
+}
+
+async function runRawEmailDispatchWorker(pool, appUrl) {
+  const lockClient = await pool.connect();
+  let locked = false;
+  try {
+    locked = Boolean((await lockClient.query("SELECT pg_try_advisory_lock(hashtext('marketing_os_email_dispatch_worker')) AS locked")).rows[0]?.locked);
+    if (!locked) return { status: 'already_running', campaignsProcessed: 0, recipientsProcessed: 0, sent: 0, failed: 0 };
+    await lockClient.query(
+      `INSERT INTO email_dispatch_worker_state (id,status,last_started_at,last_error,updated_at)
+       VALUES ('main','running',NOW(),NULL,NOW()) ON CONFLICT (id) DO UPDATE SET
+       status='running',last_started_at=NOW(),last_error=NULL,updated_at=NOW()`
+    );
+    const campaigns = (await lockClient.query(
+      `SELECT id,business_id FROM email_campaigns
+       WHERE status IN ('queued','sending') OR (status='scheduled' AND scheduled_at<=NOW())
+       ORDER BY COALESCE(last_dispatch_at,scheduled_at,created_at) ASC LIMIT 3`
+    )).rows;
+    const totals = { campaignsProcessed: 0, recipientsProcessed: 0, sent: 0, failed: 0 };
+    const errors = [];
+    for (const campaign of campaigns) {
+      try {
+        const result = await processRawEmailCampaignBatch(pool, campaign.id, campaign.business_id, appUrl, 4);
+        totals.campaignsProcessed++;
+        totals.recipientsProcessed += Number(result.processed || 0);
+        totals.sent += Number(result.sent || 0);
+        totals.failed += Number(result.failed || 0);
+      } catch (error) {
+        const message = String(error.message || 'Falha ao processar campanha').slice(0, 500);
+        errors.push(`${campaign.id}: ${message}`);
+        await lockClient.query('UPDATE email_campaigns SET last_error=$1,updated_at=NOW() WHERE id=$2', [message, campaign.id]);
+      }
+    }
+    const status = errors.length ? 'partial_failure' : 'completed';
+    await lockClient.query(
+      `UPDATE email_dispatch_worker_state SET status=$1,last_completed_at=NOW(),last_error=$2,campaigns_processed=$3,
+       recipients_processed=$4,sent_count=$5,failed_count=$6,updated_at=NOW() WHERE id='main'`,
+      [status, errors.join(' | ') || null, totals.campaignsProcessed, totals.recipientsProcessed, totals.sent, totals.failed]
+    );
+    return { status, ...totals, errors: errors.length };
+  } catch (error) {
+    if (locked) await lockClient.query(
+      "UPDATE email_dispatch_worker_state SET status='failed',last_completed_at=NOW(),last_error=$1,updated_at=NOW() WHERE id='main'",
+      [String(error.message || 'Falha no worker').slice(0, 1000)]
+    ).catch(() => {});
+    throw error;
+  } finally {
+    if (locked) await lockClient.query("SELECT pg_advisory_unlock(hashtext('marketing_os_email_dispatch_worker'))").catch(() => {});
+    lockClient.release();
+  }
+}
+
+const RESEND_EVENT_TYPES = {
+  'email.sent': 'sent', 'email.delivered': 'delivered', 'email.opened': 'opened', 'email.clicked': 'clicked',
+  'email.bounced': 'bounced', 'email.complained': 'complained', 'email.failed': 'failed', 'email.suppressed': 'suppressed',
+};
+
+function verifyRawResendWebhook(req) {
+  const secret = emailEnv('RESEND_WEBHOOK_SECRET');
+  if (!secret) { const error = new Error('RESEND_WEBHOOK_SECRET não configurado.'); error.code = 'WEBHOOK_CONFIG'; throw error; }
+  const id = String(req.get('svix-id') || '');
+  const timestampValue = String(req.get('svix-timestamp') || '');
+  const signatureHeader = String(req.get('svix-signature') || '');
+  const rawBody = String(req.rawBody || '');
+  if (!id || !timestampValue || !signatureHeader || !rawBody) { const error = new Error('Assinatura do webhook ausente.'); error.code = 'WEBHOOK_SIGNATURE'; throw error; }
+  const timestamp = Number(timestampValue);
+  if (!Number.isFinite(timestamp) || Math.abs(Date.now() / 1000 - timestamp) > 300) { const error = new Error('Assinatura expirada.'); error.code = 'WEBHOOK_SIGNATURE'; throw error; }
+  const key = Buffer.from(secret.startsWith('whsec_') ? secret.slice(6) : secret, 'base64');
+  if (!key.length) { const error = new Error('RESEND_WEBHOOK_SECRET inválido.'); error.code = 'WEBHOOK_CONFIG'; throw error; }
+  const expected = nodeCrypto.createHmac('sha256', key).update(`${id}.${timestampValue}.${rawBody}`).digest();
+  const valid = signatureHeader.split(/\s+/).map(value => value.split(',', 2)).some(([version, encoded]) => {
+    if (version !== 'v1') return false;
+    try { const received = Buffer.from(encoded || '', 'base64'); return received.length === expected.length && nodeCrypto.timingSafeEqual(received, expected); }
+    catch { return false; }
+  });
+  if (!valid) { const error = new Error('Assinatura inválida.'); error.code = 'WEBHOOK_SIGNATURE'; throw error; }
+  try { return { payload: JSON.parse(rawBody), eventId: id }; }
+  catch { const error = new Error('Payload JSON inválido.'); error.code = 'WEBHOOK_SIGNATURE'; throw error; }
+}
+
+function safeRawResendPayload(payload) {
+  return {
+    type: payload.type, created_at: payload.created_at,
+    data: {
+      email_id: payload.data?.email_id, to: Array.isArray(payload.data?.to) ? payload.data.to.slice(0, 5) : [],
+      subject: payload.data?.subject, bounce: payload.data?.bounce,
+      click: payload.data?.click ? { link: payload.data.click.link, timestamp: payload.data.click.timestamp } : undefined,
+    },
+  };
+}
+
+async function processRawResendWebhook(pool, req, verifiedEvent) {
+  const { payload, eventId } = verifiedEvent || verifyRawResendWebhook(req);
+  const eventType = RESEND_EVENT_TYPES[String(payload?.type || '')];
+  if (!eventType) return { accepted: true, ignored: true, reason: 'unsupported_event' };
+  const messageId = String(payload?.data?.email_id || '').trim();
+  if (!messageId) return { accepted: true, ignored: true, reason: 'missing_email_id' };
+  const occurredAt = new Date(payload.created_at || Date.now());
+  if (Number.isNaN(occurredAt.getTime())) { const error = new Error('Data do evento inválida.'); error.code = 'WEBHOOK_SIGNATURE'; throw error; }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const recipient = (await client.query('SELECT * FROM email_campaign_recipients WHERE provider_message_id=$1 FOR UPDATE', [messageId])).rows[0];
+    if (!recipient) { await client.query('COMMIT'); return { accepted: true, ignored: true, reason: 'recipient_not_found' }; }
+    const inserted = (await client.query(
+      `INSERT INTO email_campaign_events (organization_id,business_id,campaign_id,recipient_id,provider,provider_event_id,event_type,payload,occurred_at)
+       VALUES ($1,$2,$3,$4,'resend',$5,$6,$7::jsonb,$8)
+       ON CONFLICT (provider,provider_event_id) WHERE provider_event_id IS NOT NULL DO NOTHING RETURNING id`,
+      [recipient.organization_id, recipient.business_id, recipient.campaign_id, recipient.id, eventId, eventType, JSON.stringify(safeRawResendPayload(payload)), occurredAt]
+    )).rows[0];
+    if (!inserted) { await client.query('COMMIT'); return { accepted: true, duplicate: true }; }
+    const statusSql = {
+      sent: "CASE WHEN status IN ('queued','processing') THEN 'sent' ELSE status END",
+      delivered: "CASE WHEN status IN ('queued','processing','sent') THEN 'delivered' ELSE status END",
+      opened: "CASE WHEN status IN ('bounced','complained','suppressed','unsubscribed','cancelled') THEN status ELSE 'opened' END",
+      clicked: "CASE WHEN status IN ('bounced','complained','suppressed','unsubscribed','cancelled') THEN status ELSE 'clicked' END",
+      failed: "CASE WHEN status IN ('queued','processing','sent') THEN 'failed' ELSE status END",
+      bounced: "'bounced'", complained: "'complained'", suppressed: "'suppressed'",
+    };
+    const timestampColumn = { sent: 'sent_at', delivered: 'delivered_at', opened: 'opened_at', clicked: 'clicked_at', bounced: 'bounced_at', complained: 'complained_at' }[eventType];
+    const timestampUpdate = timestampColumn ? `,${timestampColumn}=CASE WHEN ${timestampColumn} IS NULL OR ${timestampColumn}>$2 THEN $2 ELSE ${timestampColumn} END` : '';
+    await client.query(`UPDATE email_campaign_recipients SET status=${statusSql[eventType]}${timestampUpdate},updated_at=NOW() WHERE id=$1`, [recipient.id, occurredAt]);
+    if (['bounced', 'complained', 'suppressed'].includes(eventType)) {
+      const reason = eventType === 'complained' ? 'complaint' : eventType === 'bounced' ? 'bounce' : 'invalid';
+      await client.query(
+        `INSERT INTO email_suppressions (organization_id,business_id,source_campaign_id,source_recipient_id,email,normalized_email,reason,provider,provider_reference,details,active)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'resend',$8,$9::jsonb,true)
+         ON CONFLICT (business_id,normalized_email) DO UPDATE SET reason=EXCLUDED.reason,provider='resend',provider_reference=EXCLUDED.provider_reference,
+           details=EXCLUDED.details,active=true,suppressed_at=NOW(),updated_at=NOW()`,
+        [recipient.organization_id, recipient.business_id, recipient.campaign_id, recipient.id, recipient.email, recipient.normalized_email, reason, messageId, JSON.stringify(safeRawResendPayload(payload))]
+      );
+    }
+    await client.query(
+      `UPDATE email_campaigns c SET queued_count=s.queued_count,sent_count=s.sent_count,delivered_count=s.delivered_count,
+         opened_count=s.opened_count,clicked_count=s.clicked_count,bounced_count=s.bounced_count,complained_count=s.complained_count,
+         unsubscribed_count=s.unsubscribed_count,failed_count=s.failed_count,updated_at=NOW()
+       FROM (SELECT campaign_id,
+         COUNT(*) FILTER (WHERE status IN ('queued','processing'))::int queued_count,
+         COUNT(*) FILTER (WHERE sent_at IS NOT NULL)::int sent_count,
+         COUNT(*) FILTER (WHERE delivered_at IS NOT NULL)::int delivered_count,
+         COUNT(*) FILTER (WHERE opened_at IS NOT NULL)::int opened_count,
+         COUNT(*) FILTER (WHERE clicked_at IS NOT NULL)::int clicked_count,
+         COUNT(*) FILTER (WHERE status='bounced')::int bounced_count,
+         COUNT(*) FILTER (WHERE status='complained')::int complained_count,
+         COUNT(*) FILTER (WHERE status='unsubscribed')::int unsubscribed_count,
+         COUNT(*) FILTER (WHERE status IN ('failed','suppressed'))::int failed_count
+       FROM email_campaign_recipients WHERE campaign_id=$1 GROUP BY campaign_id) s WHERE c.id=s.campaign_id`,
+      [recipient.campaign_id]
+    );
+    await client.query('COMMIT');
+    return { accepted: true, eventType, campaignId: recipient.campaign_id };
+  } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
+  finally { client.release(); }
+}
+
+function sendingDomainForClient(row) {
+  if (!row) return null;
+  return {
+    id: row.id, organizationId: row.organization_id, businessId: row.business_id, createdByUserId: row.created_by_user_id,
+    provider: row.provider, domain: row.domain, providerDomainId: row.provider_domain_id, region: row.region, status: row.status,
+    dnsRecords: row.dns_records || [], spfStatus: row.spf_status, dkimStatus: row.dkim_status,
+    dmarcStatus: row.dmarc_status, dmarcRecord: row.dmarc_record, lastCheckedAt: row.last_checked_at,
+    verifiedAt: row.verified_at, createdAt: row.created_at, updatedAt: row.updated_at,
+  };
+}
+
+function escapeEmailHtml(value) {
+  return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }
 
 // ─── Health ───────────────────────────────────────────────────────────────────
@@ -1042,6 +1675,473 @@ app.get('/api/leads', async (req, res) => {
 });
 
 // ─── B2B Prospecting ─────────────────────────────────────────────────────────
+app.get('/api/prospecting/email/provider-status', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    res.json(getResendProviderStatus());
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/prospecting/email/send-test', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const decoded = verifyToken(req);
+    const user = (await pool.query('SELECT email FROM users WHERE id=$1 LIMIT 1', [decoded.userId])).rows[0];
+    const recipient = String(user?.email || '').trim().toLowerCase();
+    if (!EMAIL_PATTERN.test(recipient)) return res.status(400).json({ error: 'O usuário atual não possui um e-mail válido para o teste.' });
+    const businessName = authorized.business.name || 'Marketing OS';
+    const result = await sendWithResend({
+      to: recipient,
+      subject: `Teste de configuração de e-mail — ${businessName}`,
+      text: `Olá! Este é um envio de teste do Marketing OS para confirmar a integração de e-mail da empresa ${businessName}. Nenhuma campanha foi iniciada.`,
+      html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#1e293b"><h2>Integração de e-mail configurada</h2><p>Este é um envio de teste do Marketing OS para confirmar a integração de e-mail da empresa <strong>${escapeEmailHtml(businessName)}</strong>.</p><p>Nenhuma campanha foi iniciada e nenhum contato da base recebeu mensagens.</p></div>`,
+      idempotencyKey: `provider-test/${authorized.business.id}/${nodeCrypto.randomUUID()}`,
+    });
+    res.json({ success: true, provider: result.provider, messageId: result.messageId, recipient });
+  } catch (e) {
+    if (e.code === 'EMAIL_PROVIDER_NOT_CONFIGURED') return res.status(503).json({ error: e.message, missingVariables: e.missingVariables });
+    console.error('[email-provider-test]', e.message);
+    res.status(502).json({ error: e.message || 'Falha ao enviar e-mail de teste.' });
+  } finally { pool.end().catch(() => {}); }
+});
+
+app.get('/api/prospecting/email/domain', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    await ensureEmailSenderDomainSchema(pool);
+    const domain = (await pool.query(
+      'SELECT * FROM email_sender_domains WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1',
+      [authorized.business.id]
+    )).rows[0];
+    res.json({ domain: sendingDomainForClient(domain), provider: getResendProviderStatus() });
+  } catch (e) {
+    console.error('[email-domain-get]', e.message);
+    res.status(500).json({ error: 'Falha ao carregar a configuração do domínio de envio.' });
+  } finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/prospecting/email/domain', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    await ensureEmailSenderDomainSchema(pool);
+    const domainName = normalizeSendingDomain(req.body?.domain);
+    const existing = (await pool.query(
+      'SELECT id FROM email_sender_domains WHERE business_id=$1 AND domain=$2 LIMIT 1',
+      [authorized.business.id, domainName]
+    )).rows[0];
+    if (existing) return res.status(409).json({ error: 'Este domínio já está cadastrado para a empresa.' });
+
+    const providerDomain = await createResendDomain(domainName, req.body?.region || 'sa-east-1');
+    const decoded = verifyToken(req);
+    const saved = (await pool.query(
+      `INSERT INTO email_sender_domains
+        (organization_id, business_id, created_by_user_id, provider, domain, provider_domain_id, region, status, dns_records, spf_status, dkim_status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [
+        authorized.business.organization_id, authorized.business.id, decoded.userId, providerDomain.provider,
+        providerDomain.domain, providerDomain.providerDomainId, providerDomain.region, providerDomain.status,
+        JSON.stringify(providerDomain.records), providerDomain.spfStatus, providerDomain.dkimStatus,
+      ]
+    )).rows[0];
+    res.status(201).json({ domain: sendingDomainForClient(saved) });
+  } catch (e) {
+    if (e.code === 'EMAIL_DOMAIN_VALIDATION') return res.status(400).json({ error: e.message });
+    if (e.code === 'EMAIL_PROVIDER_NOT_CONFIGURED') return res.status(503).json({ error: e.message, missingVariables: e.missingVariables });
+    console.error('[email-domain-create]', e.message);
+    res.status(502).json({ error: e.message || 'Falha ao cadastrar o domínio de envio.' });
+  } finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/prospecting/email/domain/verify', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    await ensureEmailSenderDomainSchema(pool);
+    const values = [authorized.business.id];
+    let where = 'business_id=$1';
+    if (req.body?.domainId) {
+      values.push(String(req.body.domainId));
+      where += ' AND id=$2';
+    }
+    const stored = (await pool.query(
+      `SELECT * FROM email_sender_domains WHERE ${where} ORDER BY created_at DESC LIMIT 1`, values
+    )).rows[0];
+    if (!stored) return res.status(404).json({ error: 'Domínio de envio não cadastrado.' });
+
+    const providerDomain = req.body?.restart === false
+      ? await getResendDomain(stored.provider_domain_id)
+      : await verifyResendDomain(stored.provider_domain_id);
+    const dmarc = await checkDomainDmarc(stored.domain);
+    const updated = (await pool.query(
+      `UPDATE email_sender_domains SET status=$1, region=$2, dns_records=$3, spf_status=$4, dkim_status=$5,
+       dmarc_status=$6, dmarc_record=$7, last_checked_at=NOW(),
+       verified_at=CASE WHEN $1='verified' THEN COALESCE(verified_at, NOW()) ELSE verified_at END, updated_at=NOW()
+       WHERE id=$8 AND business_id=$9 RETURNING *`,
+      [
+        providerDomain.status, providerDomain.region, JSON.stringify(providerDomain.records), providerDomain.spfStatus,
+        providerDomain.dkimStatus, dmarc.status, dmarc.record, stored.id, authorized.business.id,
+      ]
+    )).rows[0];
+    res.json({
+      domain: sendingDomainForClient(updated),
+      dmarcCheckedHost: dmarc.checkedHost,
+      dmarcRecommendation: dmarc.status === 'missing'
+        ? { name: dmarc.checkedHost, type: 'TXT', value: 'v=DMARC1; p=none;' }
+        : null,
+    });
+  } catch (e) {
+    if (e.code === 'EMAIL_PROVIDER_NOT_CONFIGURED') return res.status(503).json({ error: e.message, missingVariables: e.missingVariables });
+    console.error('[email-domain-verify]', e.message);
+    res.status(502).json({ error: e.message || 'Falha ao verificar o domínio de envio.' });
+  } finally { pool.end().catch(() => {}); }
+});
+
+app.get('/api/prospecting/email/campaigns/audience-preview', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    await ensureEmailCampaignSchema(pool);
+    const filters = parseRawEmailAudienceFilters(req.query);
+    res.json({ filters, ...(await rawEmailAudiencePreview(pool, authorized.business.id, filters)) });
+  } catch (e) {
+    console.error('[email-audience-preview]', e.message);
+    res.status(500).json({ error: 'Falha ao calcular a audiência elegível.' });
+  } finally { pool.end().catch(() => {}); }
+});
+
+app.get('/api/prospecting/email/campaigns', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    await ensureEmailCampaignSchema(pool);
+    const rows = (await pool.query('SELECT * FROM email_campaigns WHERE business_id=$1 ORDER BY created_at DESC', [authorized.business.id])).rows;
+    res.json({ campaigns: rows.map(emailCampaignForClient) });
+  } catch (e) {
+    console.error('[email-campaign-list]', e.message);
+    res.status(500).json({ error: 'Falha ao carregar as campanhas de e-mail.' });
+  } finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/prospecting/email/campaigns/generate-copy', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    const decoded = verifyToken(req);
+    const user = (await pool.query('SELECT name FROM users WHERE id=$1', [decoded.userId])).rows[0];
+    const objective = String(req.body?.objective || 'present_platform').slice(0, 80);
+    const offer = String(req.body?.offer || '').trim().slice(0, 500);
+    const senderName = String(req.body?.senderName || user?.name || '').trim().slice(0, 120);
+    const brand = String(authorized.business.name || 'nossa empresa').trim();
+    const objectiveLabels = {
+      present_platform: 'apresentar a empresa e sua proposta de valor',
+      advertise_products: 'convidar empresas para anunciar produtos ou serviços',
+      partnership: 'propor uma parceria comercial',
+      schedule_meeting: 'agendar uma conversa comercial breve',
+    };
+    const objectiveLabel = objectiveLabels[objective] || objectiveLabels.present_platform;
+    let copy = {
+      subject: `Uma oportunidade de parceria com a ${brand}`,
+      previewText: `Uma conversa objetiva sobre como a ${brand} pode apoiar sua empresa.`,
+      textBody: `Olá,\n\nSou ${senderName || 'da equipe comercial'} da ${brand}. Gostaria de apresentar nossa atuação e entender se existe aderência com os objetivos comerciais da sua empresa.${offer ? `\n\nNosso foco neste contato é: ${offer}.` : ''}\n\nSe fizer sentido, podemos marcar uma conversa breve de 10 minutos nos próximos dias?\n\nAtenciosamente,\n${senderName || `Equipe ${brand}`}`,
+    };
+    let source = 'template';
+    if (process.env.GEMINI_API_KEY) {
+      const { GoogleGenAI } = await import('@google/genai');
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: `Crie um e-mail comercial B2B universal em português do Brasil para a empresa ${brand}.
+Objetivo: ${objectiveLabel}. Remetente: ${senderName || 'equipe comercial'}. Oferta: ${offer || 'não informada'}.
+Seja curto, claro, ético e consultivo. Não finja relacionamento prévio e não invente fatos, preços, clientes, resultados ou garantias. Não use o nome da empresa destinatária nem campos variáveis. Use saudação universal e uma chamada para conversa sem pressão. Retorne somente JSON válido com subject, previewText e textBody.`,
+        config: { responseMimeType: 'application/json', maxOutputTokens: 1200 },
+      });
+      const generated = JSON.parse(response.text || '{}');
+      if (generated.subject && generated.previewText && generated.textBody) {
+        copy = {
+          subject: String(generated.subject).trim().slice(0, 200),
+          previewText: String(generated.previewText).trim().slice(0, 240),
+          textBody: String(generated.textBody).trim().slice(0, 20000),
+        };
+        source = 'gemini';
+      }
+    }
+    res.json({ ...copy, source });
+  } catch (e) {
+    console.error('[email-campaign-copy]', e.message);
+    res.status(500).json({ error: e.message || 'Falha ao gerar a abordagem universal.' });
+  } finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/prospecting/email/campaigns', async (req, res) => {
+  const pool = createPool();
+  let client;
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    await ensureEmailSenderDomainSchema(pool);
+    await ensureEmailCampaignSchema(pool);
+    const decoded = verifyToken(req);
+    const name = String(req.body?.name || '').trim().slice(0, 200);
+    const subject = String(req.body?.subject || '').trim().slice(0, 200);
+    const previewText = String(req.body?.previewText || '').trim().slice(0, 240);
+    const textBody = String(req.body?.textBody || '').trim().slice(0, 20000);
+    const senderName = String(req.body?.senderName || '').trim().slice(0, 120);
+    const senderLocalPart = String(req.body?.senderLocalPart || 'contato').trim().toLowerCase();
+    const replyToEmail = String(req.body?.replyToEmail || '').trim().toLowerCase().slice(0, 250);
+    const legalBasis = String(req.body?.legalBasis || 'legitimate_interest');
+    const processingPurpose = String(req.body?.processingPurpose || '').trim().slice(0, 1000);
+    const balanceTestReference = String(req.body?.balanceTestReference || '').trim().slice(0, 2000);
+    const filters = parseRawEmailAudienceFilters(req.body?.audienceFilters || {});
+    if (!name || !subject || textBody.length < 40 || !senderName) return res.status(400).json({ error: 'Nome, remetente, assunto e uma mensagem com pelo menos 40 caracteres são obrigatórios.' });
+    if (!/^[a-z0-9][a-z0-9._+-]{0,63}$/.test(senderLocalPart)) return res.status(400).json({ error: 'O endereço do remetente antes do @ é inválido.' });
+    if (replyToEmail && !EMAIL_PATTERN.test(replyToEmail)) return res.status(400).json({ error: 'O e-mail de resposta é inválido.' });
+    if (!['legitimate_interest', 'consent'].includes(legalBasis) || processingPurpose.length < 15) return res.status(400).json({ error: 'Informe a base legal e a finalidade do tratamento dos contatos.' });
+    if (legalBasis === 'legitimate_interest' && balanceTestReference.length < 20) return res.status(400).json({ error: 'Registre o teste de balanceamento do legítimo interesse antes de salvar.' });
+    if (req.body?.includeUnsubscribe !== true) return res.status(400).json({ error: 'O descadastramento é obrigatório em campanhas de prospecção.' });
+    const domain = (await pool.query('SELECT * FROM email_sender_domains WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [authorized.business.id])).rows[0];
+    if (!domain) return res.status(409).json({ error: 'Cadastre o domínio de envio antes de criar a campanha.' });
+    const senderEmail = `${senderLocalPart}@${domain.domain}`;
+    const htmlBody = `<div style="font-family:Arial,sans-serif;max-width:640px;margin:auto;color:#1e293b">${textBody.split(/\n{2,}/).map(paragraph => `<p style="margin:0 0 16px;line-height:1.6">${escapeEmailHtml(paragraph).replace(/\n/g, '<br>')}</p>`).join('')}</div>`;
+
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const campaign = (await client.query(
+      `INSERT INTO email_campaigns
+       (organization_id,business_id,created_by_user_id,name,status,subject,preview_text,html_body,text_body,sender_name,sender_email,reply_to_email,audience_filters,template_variables,legal_basis,processing_purpose,balance_test_reference,include_unsubscribe,provider)
+       VALUES ($1,$2,$3,$4,'draft',$5,$6,$7,$8,$9,$10,$11,$12,'[]'::jsonb,$13,$14,$15,true,'resend') RETURNING *`,
+      [authorized.business.organization_id, authorized.business.id, decoded.userId, name, subject, previewText || null, htmlBody, textBody, senderName, senderEmail, replyToEmail || null, JSON.stringify(filters), legalBasis, processingPurpose, balanceTestReference || null]
+    )).rows[0];
+    const audience = rawEmailAudienceWhere(authorized.business.id, filters, 4);
+    await client.query(
+      `WITH ranked AS (
+         SELECT p.id,p.company_name,p.legal_name,BTRIM(p.email) AS email,LOWER(BTRIM(p.email)) AS normalized_email,
+                ROW_NUMBER() OVER (PARTITION BY LOWER(BTRIM(p.email)) ORDER BY p.qualification_score DESC NULLS LAST,p.created_at DESC) AS email_rank
+           FROM prospects p WHERE ${audience.clause}
+             AND BTRIM(p.email) ~* '^[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$'
+       )
+       INSERT INTO email_campaign_recipients
+         (organization_id,business_id,campaign_id,prospect_id,email,normalized_email,recipient_name,company_name,personalization,status)
+       SELECT $1,$2,$3,r.id,r.email,r.normalized_email,COALESCE(NULLIF(r.legal_name,''),r.company_name),r.company_name,
+              jsonb_build_object('companyName',r.company_name),'queued'
+         FROM ranked r WHERE r.email_rank=1
+          AND NOT EXISTS (SELECT 1 FROM email_unsubscribes u WHERE u.business_id=$2 AND u.normalized_email=r.normalized_email)
+          AND NOT EXISTS (SELECT 1 FROM email_suppressions s WHERE s.business_id=$2 AND s.normalized_email=r.normalized_email AND s.active=true)
+       ON CONFLICT (campaign_id,normalized_email) DO NOTHING`,
+      [authorized.business.organization_id, authorized.business.id, campaign.id, ...audience.values]
+    );
+    const total = Number((await client.query('SELECT COUNT(*)::int AS count FROM email_campaign_recipients WHERE campaign_id=$1', [campaign.id])).rows[0]?.count || 0);
+    const updated = (await client.query('UPDATE email_campaigns SET total_recipients=$1,updated_at=NOW() WHERE id=$2 RETURNING *', [total, campaign.id])).rows[0];
+    await client.query('COMMIT');
+    res.status(201).json({ campaign: emailCampaignForClient(updated) });
+  } catch (e) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    console.error('[email-campaign-create]', e.message);
+    res.status(500).json({ error: e.message || 'Falha ao salvar o rascunho da campanha.' });
+  } finally {
+    client?.release();
+    pool.end().catch(() => {});
+  }
+});
+
+app.post('/api/prospecting/email/campaigns/:campaignId/start', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    await ensureEmailSenderDomainSchema(pool); await ensureEmailCampaignSchema(pool);
+    if (req.body?.confirmation !== 'INICIAR') return res.status(400).json({ error: 'Confirmação de início ausente.' });
+    const campaign = (await pool.query('SELECT * FROM email_campaigns WHERE id=$1 AND business_id=$2', [req.params.campaignId, authorized.business.id])).rows[0];
+    if (!campaign) return res.status(404).json({ error: 'Campanha de e-mail não encontrada.' });
+    if (campaign.status !== 'draft') return res.status(409).json({ error: 'Somente campanhas em rascunho podem ser iniciadas.' });
+    if (Number(req.body?.expectedRecipientCount) !== Number(campaign.total_recipients)) return res.status(409).json({ error: 'A audiência mudou. Revise a quantidade antes de iniciar.' });
+    if (!Number(campaign.total_recipients)) return res.status(409).json({ error: 'A campanha não possui destinatários elegíveis.' });
+    const domain = (await pool.query('SELECT * FROM email_sender_domains WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [authorized.business.id])).rows[0];
+    if (!domain || domain.status !== 'verified') return res.status(409).json({ error: 'Verifique SPF e DKIM do domínio antes de iniciar.' });
+    if (!String(campaign.sender_email).toLowerCase().endsWith(`@${String(domain.domain).toLowerCase()}`)) return res.status(409).json({ error: 'O remetente não pertence ao domínio verificado.' });
+    if (!getResendProviderStatus().apiConfigured) return res.status(503).json({ error: 'RESEND_API_KEY não configurada.', missingVariables: ['RESEND_API_KEY'] });
+    const rate = Math.min(100, Math.max(1, Number(req.body?.sendRatePerMinute || 30)));
+    const dailyLimit = Math.min(10000, Math.max(1, Number(req.body?.dailyLimit || 500)));
+    const batchSize = Math.min(25, Math.max(1, Number(req.body?.batchSize || 10)));
+    const scheduledAt = req.body?.scheduledAt ? new Date(req.body.scheduledAt) : null;
+    if (scheduledAt && (Number.isNaN(scheduledAt.getTime()) || scheduledAt.getTime() <= Date.now() + 30000 || scheduledAt.getTime() > Date.now() + 366 * 86400000)) return res.status(400).json({ error: 'Data de agendamento inválida.' });
+    const updated = (await pool.query(
+      `UPDATE email_campaigns SET status=$1,send_rate_per_minute=$2,daily_limit=$3,batch_size=$4,scheduled_at=$5,
+       queued_count=total_recipients,paused_at=NULL,last_error=NULL,updated_at=NOW()
+       WHERE id=$6 AND business_id=$7 AND status='draft' RETURNING *`,
+      [scheduledAt ? 'scheduled' : 'queued', rate, dailyLimit, batchSize, scheduledAt, campaign.id, authorized.business.id]
+    )).rows[0];
+    res.json({ campaign: emailCampaignForClient(updated) });
+  } catch (e) { console.error('[email-campaign-start]', e.message); res.status(500).json({ error: e.message || 'Falha ao iniciar a campanha.' }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/prospecting/email/campaigns/:campaignId/process', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    await ensureEmailSenderDomainSchema(pool); await ensureEmailCampaignSchema(pool);
+    if (!process.env.APP_URL) return res.status(503).json({ error: 'APP_URL não configurada para os links de descadastramento.' });
+    res.json(await processRawEmailCampaignBatch(pool, req.params.campaignId, authorized.business.id, process.env.APP_URL));
+  } catch (e) {
+    console.error('[email-campaign-process]', e.message);
+    res.status(e.code === 'EMAIL_PROVIDER_NOT_CONFIGURED' ? 503 : 500).json({ error: e.message || 'Falha ao processar o lote.' });
+  } finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/prospecting/email/campaigns/:campaignId/pause', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    await ensureEmailCampaignSchema(pool);
+    const campaign = (await pool.query("UPDATE email_campaigns SET status='paused',paused_at=NOW(),updated_at=NOW() WHERE id=$1 AND business_id=$2 AND status IN ('queued','sending','scheduled') RETURNING *", [req.params.campaignId, authorized.business.id])).rows[0];
+    if (!campaign) return res.status(409).json({ error: 'A campanha não está em execução.' });
+    res.json({ campaign: emailCampaignForClient(campaign) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/prospecting/email/campaigns/:campaignId/resume', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    await ensureEmailCampaignSchema(pool);
+    if (req.body?.confirmation !== 'RETOMAR') return res.status(400).json({ error: 'Confirmação de retomada ausente.' });
+    const campaign = (await pool.query("UPDATE email_campaigns SET status=CASE WHEN scheduled_at > NOW() THEN 'scheduled' ELSE 'queued' END,paused_at=NULL,updated_at=NOW() WHERE id=$1 AND business_id=$2 AND status='paused' RETURNING *", [req.params.campaignId, authorized.business.id])).rows[0];
+    if (!campaign) return res.status(409).json({ error: 'A campanha não está pausada.' });
+    res.json({ campaign: emailCampaignForClient(campaign) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/prospecting/email/campaigns/:campaignId/cancel', async (req, res) => {
+  const pool = createPool(); let client;
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    await ensureEmailCampaignSchema(pool);
+    if (req.body?.confirmation !== 'CANCELAR') return res.status(400).json({ error: 'Confirmação de cancelamento ausente.' });
+    client = await pool.connect(); await client.query('BEGIN');
+    const campaign = (await client.query("UPDATE email_campaigns SET status='cancelled',queued_count=0,cancelled_at=NOW(),updated_at=NOW() WHERE id=$1 AND business_id=$2 AND status IN ('draft','queued','sending','paused','scheduled') RETURNING *", [req.params.campaignId, authorized.business.id])).rows[0];
+    if (!campaign) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'A campanha não pode ser cancelada.' }); }
+    await client.query("UPDATE email_campaign_recipients SET status='cancelled',updated_at=NOW() WHERE campaign_id=$1 AND status IN ('queued','processing')", [campaign.id]);
+    await client.query('COMMIT'); res.json({ campaign: emailCampaignForClient(campaign) });
+  } catch (e) { if (client) await client.query('ROLLBACK').catch(() => {}); res.status(500).json({ error: e.message || 'Falha ao cancelar a campanha.' }); }
+  finally { client?.release(); pool.end().catch(() => {}); }
+});
+
+app.get('/api/prospecting/email/worker', async (req, res) => {
+  let pool;
+  try {
+    verifyRawEmailWorkerAuthorization(req);
+    const appUrl = emailEnv('APP_URL');
+    if (!appUrl) { const error = new Error('APP_URL não configurada.'); error.code = 'WORKER_CONFIG'; throw error; }
+    pool = createPool();
+    await ensureEmailSenderDomainSchema(pool); await ensureEmailCampaignSchema(pool);
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(200).json(await runRawEmailDispatchWorker(pool, appUrl));
+  } catch (error) {
+    if (error.code === 'WORKER_AUTH') return res.status(401).json({ error: error.message });
+    if (error.code === 'WORKER_CONFIG') return res.status(503).json({ error: error.message });
+    console.error('[email-dispatch-worker]', error.message);
+    res.status(500).json({ error: 'Falha ao executar o worker de e-mails.' });
+  } finally { pool?.end().catch(() => {}); }
+});
+
+app.get('/api/prospecting/email/worker/status', async (req, res) => {
+  const pool = createPool();
+  try {
+    const authorized = await getAuthorizedBusiness(pool, req);
+    if (authorized.error) return res.status(authorized.error).json({ error: authorized.message });
+    await ensureEmailCampaignSchema(pool);
+    const [state, workload] = await Promise.all([
+      pool.query("SELECT * FROM email_dispatch_worker_state WHERE id='main'"),
+      pool.query(
+        `SELECT COUNT(DISTINCT c.id)::int AS active_campaigns,
+                COUNT(r.id) FILTER (WHERE r.status IN ('queued','processing'))::int AS pending_recipients
+         FROM email_campaigns c LEFT JOIN email_campaign_recipients r ON r.campaign_id=c.id
+         WHERE c.business_id=$1 AND c.status IN ('scheduled','queued','sending')`,
+        [authorized.business.id]
+      ),
+    ]);
+    const row = state.rows[0] || {};
+    res.json({
+      configured: emailEnv('CRON_SECRET').length >= 16, status: row.status || 'never_run',
+      lastStartedAt: row.last_started_at || null, lastCompletedAt: row.last_completed_at || null,
+      lastError: row.last_error || null, activeCampaigns: Number(workload.rows[0]?.active_campaigns || 0),
+      pendingRecipients: Number(workload.rows[0]?.pending_recipients || 0),
+    });
+  } catch (error) { res.status(500).json({ error: error.message || 'Falha ao consultar o worker.' }); }
+  finally { pool.end().catch(() => {}); }
+});
+
+app.post('/api/prospecting/email/webhooks/resend', async (req, res) => {
+  let pool;
+  try {
+    const verifiedEvent = verifyRawResendWebhook(req);
+    pool = createPool();
+    await ensureEmailCampaignSchema(pool);
+    res.status(200).json(await processRawResendWebhook(pool, req, verifiedEvent));
+  } catch (error) {
+    if (error.code === 'WEBHOOK_CONFIG') return res.status(503).json({ error: error.message });
+    if (error.code === 'WEBHOOK_SIGNATURE') return res.status(400).json({ error: error.message });
+    console.error('[resend-webhook]', error.message);
+    res.status(500).json({ error: 'Falha ao processar o evento de e-mail.' });
+  } finally { pool?.end().catch(() => {}); }
+});
+
+async function rawUnsubscribeHandler(req, res) {
+  const token = String(req.params.token || '');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(token)) return res.status(400).send('Link de descadastramento inválido.');
+  const pool = createPool(); let client;
+  try {
+    await ensureEmailCampaignSchema(pool); client = await pool.connect(); await client.query('BEGIN');
+    const recipient = (await client.query('SELECT * FROM email_campaign_recipients WHERE unsubscribe_token=$1 FOR UPDATE', [token])).rows[0];
+    if (!recipient) { await client.query('ROLLBACK'); return res.status(404).send('Link de descadastramento não encontrado.'); }
+    await client.query(
+      `INSERT INTO email_unsubscribes (organization_id,business_id,campaign_id,recipient_id,email,normalized_email,source)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (business_id,normalized_email) DO UPDATE SET
+       campaign_id=EXCLUDED.campaign_id,recipient_id=EXCLUDED.recipient_id,source=EXCLUDED.source,unsubscribed_at=NOW()`,
+      [recipient.organization_id, recipient.business_id, recipient.campaign_id, recipient.id, recipient.email, recipient.normalized_email, req.method === 'POST' ? 'one_click' : 'link']
+    );
+    await client.query(
+      `INSERT INTO email_campaign_events (organization_id,business_id,campaign_id,recipient_id,provider,event_type,payload,occurred_at)
+       VALUES ($1,$2,$3,$4,'internal','unsubscribed',$5::jsonb,NOW())`,
+      [recipient.organization_id, recipient.business_id, recipient.campaign_id, recipient.id, JSON.stringify({ source: req.method === 'POST' ? 'one_click' : 'link' })]
+    );
+    await client.query("UPDATE email_campaign_recipients SET status='unsubscribed',unsubscribed_at=NOW(),updated_at=NOW() WHERE business_id=$1 AND normalized_email=$2 AND status<>'cancelled'", [recipient.business_id, recipient.normalized_email]);
+    await client.query(
+      `UPDATE email_campaigns c SET unsubscribed_count=s.total,updated_at=NOW()
+       FROM (SELECT campaign_id,COUNT(*) FILTER (WHERE status='unsubscribed')::int total
+             FROM email_campaign_recipients WHERE business_id=$1 AND normalized_email=$2 GROUP BY campaign_id) s
+       WHERE c.id=s.campaign_id`,
+      [recipient.business_id, recipient.normalized_email]
+    );
+    await client.query('COMMIT');
+    if (req.method === 'POST') return res.status(200).send('OK');
+    res.status(200).type('html').send('<!doctype html><html lang="pt-BR"><meta charset="utf-8"><title>Descadastrado</title><body style="font-family:Arial,sans-serif;max-width:560px;margin:80px auto;padding:24px;color:#1e293b"><h1>Descadastramento confirmado</h1><p>Este endereço não receberá novos e-mails de prospecção desta empresa.</p></body></html>');
+  } catch (e) { if (client) await client.query('ROLLBACK').catch(() => {}); res.status(500).send('Não foi possível concluir o descadastramento.'); }
+  finally { client?.release(); pool.end().catch(() => {}); }
+}
+
+app.get('/api/prospecting/email/unsubscribe/:token', rawUnsubscribeHandler);
+app.post('/api/prospecting/email/unsubscribe/:token', rawUnsubscribeHandler);
+
 function prospectingSearchForClient(row) {
   return {
     ...row,

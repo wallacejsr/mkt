@@ -1,5 +1,5 @@
 import { relations } from 'drizzle-orm';
-import { boolean, integer, jsonb, pgTable, serial, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { boolean, index, integer, jsonb, pgTable, serial, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('users', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -483,6 +483,187 @@ export const prospectContacts = pgTable('prospect_contacts', {
   createdAt: timestamp('created_at').defaultNow(),
 });
 
+// --- PROSPECTING EMAIL CAMPAIGNS ---
+
+export const emailSenderDomains = pgTable('email_sender_domains', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  organizationId: uuid('organization_id').references(() => organizations.id).notNull(),
+  businessId: uuid('business_id').references(() => businesses.id).notNull(),
+  createdByUserId: uuid('created_by_user_id').references(() => users.id),
+  provider: text('provider').notNull().default('resend'),
+  domain: text('domain').notNull(),
+  providerDomainId: text('provider_domain_id').notNull(),
+  region: text('region').notNull().default('sa-east-1'),
+  status: text('status').notNull().default('not_started'),
+  dnsRecords: jsonb('dns_records').notNull().default([]),
+  spfStatus: text('spf_status').notNull().default('not_started'),
+  dkimStatus: text('dkim_status').notNull().default('not_started'),
+  dmarcStatus: text('dmarc_status').notNull().default('missing'),
+  dmarcRecord: text('dmarc_record'),
+  lastCheckedAt: timestamp('last_checked_at'),
+  verifiedAt: timestamp('verified_at'),
+  createdAt: timestamp('created_at').defaultNow(),
+  updatedAt: timestamp('updated_at').defaultNow(),
+}, table => ({
+  businessDomainUnique: uniqueIndex('email_sender_domains_business_domain_uidx').on(table.businessId, table.domain),
+  providerDomainUnique: uniqueIndex('email_sender_domains_provider_domain_uidx').on(table.provider, table.providerDomainId),
+  businessStatusIdx: index('email_sender_domains_business_status_idx').on(table.businessId, table.status),
+}));
+
+export const emailCampaigns = pgTable('email_campaigns', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  organizationId: uuid('organization_id').references(() => organizations.id).notNull(),
+  businessId: uuid('business_id').references(() => businesses.id).notNull(),
+  createdByUserId: uuid('created_by_user_id').references(() => users.id),
+  name: text('name').notNull(),
+  status: text('status').notNull().default('draft'), // draft, scheduled, queued, sending, paused, completed, cancelled, failed
+  subject: text('subject').notNull(),
+  previewText: text('preview_text'),
+  htmlBody: text('html_body'),
+  textBody: text('text_body').notNull(),
+  senderName: text('sender_name').notNull(),
+  senderEmail: text('sender_email').notNull(),
+  replyToEmail: text('reply_to_email'),
+  audienceFilters: jsonb('audience_filters').default({}),
+  templateVariables: jsonb('template_variables').default([]),
+  legalBasis: text('legal_basis'),
+  processingPurpose: text('processing_purpose'),
+  balanceTestReference: text('balance_test_reference'),
+  includeUnsubscribe: boolean('include_unsubscribe').notNull().default(true),
+  provider: text('provider'),
+  providerBatchId: text('provider_batch_id'),
+  totalRecipients: integer('total_recipients').notNull().default(0),
+  queuedCount: integer('queued_count').notNull().default(0),
+  sentCount: integer('sent_count').notNull().default(0),
+  deliveredCount: integer('delivered_count').notNull().default(0),
+  openedCount: integer('opened_count').notNull().default(0),
+  clickedCount: integer('clicked_count').notNull().default(0),
+  bouncedCount: integer('bounced_count').notNull().default(0),
+  complainedCount: integer('complained_count').notNull().default(0),
+  unsubscribedCount: integer('unsubscribed_count').notNull().default(0),
+  failedCount: integer('failed_count').notNull().default(0),
+  sendRatePerMinute: integer('send_rate_per_minute').notNull().default(30),
+  dailyLimit: integer('daily_limit').notNull().default(500),
+  batchSize: integer('batch_size').notNull().default(10),
+  scheduledAt: timestamp('scheduled_at'),
+  startedAt: timestamp('started_at'),
+  completedAt: timestamp('completed_at'),
+  lastDispatchAt: timestamp('last_dispatch_at'),
+  pausedAt: timestamp('paused_at'),
+  cancelledAt: timestamp('cancelled_at'),
+  lastError: text('last_error'),
+  createdAt: timestamp('created_at').defaultNow(),
+  updatedAt: timestamp('updated_at').defaultNow(),
+}, table => ({
+  businessStatusIdx: index('email_campaigns_business_status_idx').on(table.businessId, table.status),
+  scheduledIdx: index('email_campaigns_scheduled_idx').on(table.status, table.scheduledAt),
+}));
+
+export const emailCampaignRecipients = pgTable('email_campaign_recipients', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  organizationId: uuid('organization_id').references(() => organizations.id).notNull(),
+  businessId: uuid('business_id').references(() => businesses.id).notNull(),
+  campaignId: uuid('campaign_id').references(() => emailCampaigns.id, { onDelete: 'cascade' }).notNull(),
+  prospectId: uuid('prospect_id').references(() => prospects.id, { onDelete: 'set null' }),
+  leadId: uuid('lead_id').references(() => leads.id, { onDelete: 'set null' }),
+  email: text('email').notNull(),
+  normalizedEmail: text('normalized_email').notNull(),
+  recipientName: text('recipient_name'),
+  companyName: text('company_name'),
+  personalization: jsonb('personalization').default({}),
+  status: text('status').notNull().default('queued'), // queued, processing, sent, delivered, opened, clicked, bounced, complained, unsubscribed, failed, suppressed, cancelled
+  providerMessageId: text('provider_message_id'),
+  lastError: text('last_error'),
+  attemptCount: integer('attempt_count').notNull().default(0),
+  unsubscribeToken: uuid('unsubscribe_token').defaultRandom().notNull(),
+  scheduledAt: timestamp('scheduled_at'),
+  lastAttemptAt: timestamp('last_attempt_at'),
+  sentAt: timestamp('sent_at'),
+  deliveredAt: timestamp('delivered_at'),
+  openedAt: timestamp('opened_at'),
+  clickedAt: timestamp('clicked_at'),
+  bouncedAt: timestamp('bounced_at'),
+  complainedAt: timestamp('complained_at'),
+  unsubscribedAt: timestamp('unsubscribed_at'),
+  createdAt: timestamp('created_at').defaultNow(),
+  updatedAt: timestamp('updated_at').defaultNow(),
+}, table => ({
+  campaignEmailUnique: uniqueIndex('email_recipients_campaign_email_uidx').on(table.campaignId, table.normalizedEmail),
+  unsubscribeTokenUnique: uniqueIndex('email_recipients_unsubscribe_token_uidx').on(table.unsubscribeToken),
+  dispatchIdx: index('email_recipients_dispatch_idx').on(table.campaignId, table.status, table.scheduledAt),
+  providerMessageIdx: index('email_recipients_provider_message_idx').on(table.providerMessageId),
+  businessEmailIdx: index('email_recipients_business_email_idx').on(table.businessId, table.normalizedEmail),
+}));
+
+export const emailCampaignEvents = pgTable('email_campaign_events', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  organizationId: uuid('organization_id').references(() => organizations.id).notNull(),
+  businessId: uuid('business_id').references(() => businesses.id).notNull(),
+  campaignId: uuid('campaign_id').references(() => emailCampaigns.id, { onDelete: 'cascade' }).notNull(),
+  recipientId: uuid('recipient_id').references(() => emailCampaignRecipients.id, { onDelete: 'cascade' }),
+  provider: text('provider').notNull(),
+  providerEventId: text('provider_event_id'),
+  eventType: text('event_type').notNull(), // queued, sent, delivered, opened, clicked, bounced, complained, unsubscribed, failed
+  payload: jsonb('payload').default({}),
+  occurredAt: timestamp('occurred_at').notNull(),
+  createdAt: timestamp('created_at').defaultNow(),
+}, table => ({
+  providerEventUnique: uniqueIndex('email_events_provider_event_uidx').on(table.provider, table.providerEventId),
+  campaignOccurredIdx: index('email_events_campaign_occurred_idx').on(table.campaignId, table.occurredAt),
+  recipientIdx: index('email_events_recipient_idx').on(table.recipientId),
+}));
+
+export const emailUnsubscribes = pgTable('email_unsubscribes', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  organizationId: uuid('organization_id').references(() => organizations.id).notNull(),
+  businessId: uuid('business_id').references(() => businesses.id).notNull(),
+  campaignId: uuid('campaign_id').references(() => emailCampaigns.id, { onDelete: 'set null' }),
+  recipientId: uuid('recipient_id').references(() => emailCampaignRecipients.id, { onDelete: 'set null' }),
+  email: text('email').notNull(),
+  normalizedEmail: text('normalized_email').notNull(),
+  reason: text('reason'),
+  source: text('source').notNull().default('link'), // link, one_click, complaint, manual, provider
+  unsubscribedAt: timestamp('unsubscribed_at').defaultNow().notNull(),
+  createdAt: timestamp('created_at').defaultNow(),
+}, table => ({
+  businessEmailUnique: uniqueIndex('email_unsubscribes_business_email_uidx').on(table.businessId, table.normalizedEmail),
+  campaignIdx: index('email_unsubscribes_campaign_idx').on(table.campaignId),
+}));
+
+export const emailSuppressions = pgTable('email_suppressions', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  organizationId: uuid('organization_id').references(() => organizations.id).notNull(),
+  businessId: uuid('business_id').references(() => businesses.id).notNull(),
+  sourceCampaignId: uuid('source_campaign_id').references(() => emailCampaigns.id, { onDelete: 'set null' }),
+  sourceRecipientId: uuid('source_recipient_id').references(() => emailCampaignRecipients.id, { onDelete: 'set null' }),
+  email: text('email').notNull(),
+  normalizedEmail: text('normalized_email').notNull(),
+  reason: text('reason').notNull(), // bounce, complaint, unsubscribe, invalid, manual
+  provider: text('provider'),
+  providerReference: text('provider_reference'),
+  details: jsonb('details').default({}),
+  active: boolean('active').notNull().default(true),
+  suppressedAt: timestamp('suppressed_at').defaultNow().notNull(),
+  createdAt: timestamp('created_at').defaultNow(),
+  updatedAt: timestamp('updated_at').defaultNow(),
+}, table => ({
+  businessEmailUnique: uniqueIndex('email_suppressions_business_email_uidx').on(table.businessId, table.normalizedEmail),
+  activeReasonIdx: index('email_suppressions_active_reason_idx').on(table.businessId, table.active, table.reason),
+}));
+
+export const emailDispatchWorkerState = pgTable('email_dispatch_worker_state', {
+  id: text('id').primaryKey().default('main'),
+  status: text('status').notNull().default('idle'),
+  lastStartedAt: timestamp('last_started_at'),
+  lastCompletedAt: timestamp('last_completed_at'),
+  lastError: text('last_error'),
+  campaignsProcessed: integer('campaigns_processed').notNull().default(0),
+  recipientsProcessed: integer('recipients_processed').notNull().default(0),
+  sentCount: integer('sent_count').notNull().default(0),
+  failedCount: integer('failed_count').notNull().default(0),
+  updatedAt: timestamp('updated_at').defaultNow(),
+});
+
 export const prospectingSearchesRelations = relations(prospectingSearches, ({ one, many }) => ({
   organization: one(organizations, { fields: [prospectingSearches.organizationId], references: [organizations.id] }),
   business: one(businesses, { fields: [prospectingSearches.businessId], references: [businesses.id] }),
@@ -500,4 +681,52 @@ export const prospectsRelations = relations(prospects, ({ one, many }) => ({
 
 export const prospectContactsRelations = relations(prospectContacts, ({ one }) => ({
   prospect: one(prospects, { fields: [prospectContacts.prospectId], references: [prospects.id] }),
+}));
+
+export const emailCampaignsRelations = relations(emailCampaigns, ({ one, many }) => ({
+  organization: one(organizations, { fields: [emailCampaigns.organizationId], references: [organizations.id] }),
+  business: one(businesses, { fields: [emailCampaigns.businessId], references: [businesses.id] }),
+  createdBy: one(users, { fields: [emailCampaigns.createdByUserId], references: [users.id] }),
+  recipients: many(emailCampaignRecipients),
+  events: many(emailCampaignEvents),
+  unsubscribes: many(emailUnsubscribes),
+  suppressions: many(emailSuppressions),
+}));
+
+export const emailSenderDomainsRelations = relations(emailSenderDomains, ({ one }) => ({
+  organization: one(organizations, { fields: [emailSenderDomains.organizationId], references: [organizations.id] }),
+  business: one(businesses, { fields: [emailSenderDomains.businessId], references: [businesses.id] }),
+  createdBy: one(users, { fields: [emailSenderDomains.createdByUserId], references: [users.id] }),
+}));
+
+export const emailCampaignRecipientsRelations = relations(emailCampaignRecipients, ({ one, many }) => ({
+  organization: one(organizations, { fields: [emailCampaignRecipients.organizationId], references: [organizations.id] }),
+  business: one(businesses, { fields: [emailCampaignRecipients.businessId], references: [businesses.id] }),
+  campaign: one(emailCampaigns, { fields: [emailCampaignRecipients.campaignId], references: [emailCampaigns.id] }),
+  prospect: one(prospects, { fields: [emailCampaignRecipients.prospectId], references: [prospects.id] }),
+  lead: one(leads, { fields: [emailCampaignRecipients.leadId], references: [leads.id] }),
+  events: many(emailCampaignEvents),
+  unsubscribes: many(emailUnsubscribes),
+  suppressions: many(emailSuppressions),
+}));
+
+export const emailCampaignEventsRelations = relations(emailCampaignEvents, ({ one }) => ({
+  organization: one(organizations, { fields: [emailCampaignEvents.organizationId], references: [organizations.id] }),
+  business: one(businesses, { fields: [emailCampaignEvents.businessId], references: [businesses.id] }),
+  campaign: one(emailCampaigns, { fields: [emailCampaignEvents.campaignId], references: [emailCampaigns.id] }),
+  recipient: one(emailCampaignRecipients, { fields: [emailCampaignEvents.recipientId], references: [emailCampaignRecipients.id] }),
+}));
+
+export const emailUnsubscribesRelations = relations(emailUnsubscribes, ({ one }) => ({
+  organization: one(organizations, { fields: [emailUnsubscribes.organizationId], references: [organizations.id] }),
+  business: one(businesses, { fields: [emailUnsubscribes.businessId], references: [businesses.id] }),
+  campaign: one(emailCampaigns, { fields: [emailUnsubscribes.campaignId], references: [emailCampaigns.id] }),
+  recipient: one(emailCampaignRecipients, { fields: [emailUnsubscribes.recipientId], references: [emailCampaignRecipients.id] }),
+}));
+
+export const emailSuppressionsRelations = relations(emailSuppressions, ({ one }) => ({
+  organization: one(organizations, { fields: [emailSuppressions.organizationId], references: [organizations.id] }),
+  business: one(businesses, { fields: [emailSuppressions.businessId], references: [businesses.id] }),
+  sourceCampaign: one(emailCampaigns, { fields: [emailSuppressions.sourceCampaignId], references: [emailCampaigns.id] }),
+  sourceRecipient: one(emailCampaignRecipients, { fields: [emailSuppressions.sourceRecipientId], references: [emailCampaignRecipients.id] }),
 }));

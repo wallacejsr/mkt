@@ -144,11 +144,15 @@ export function ProspectDrawer({ prospectId, onClose, onImportToCRM, onRefreshPr
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Falha ao gerar proposta de abordagem.');
-      if (!data.approach?.subject || !data.approach?.message) throw new Error('A abordagem retornada está incompleta. Tente novamente.');
+      const approach = data.approach;
+      const hasCoreMessage = Boolean(approach?.opening && approach?.message && approach?.cta);
+      const hasRequiredSubject = options.channel !== 'email' || Boolean(approach?.subject);
+      if (!hasCoreMessage || !hasRequiredSubject) throw new Error('A abordagem retornada está incompleta. Tente novamente.');
+      if (options.channel !== 'email' && approach.subject == null) approach.subject = '';
       setIsApproachSetupOpen(false);
       onOpenApproach(
         prospect.companyName,
-        data.approach,
+        approach,
         { source: data.source || 'template', channel: options.channel },
         () => handleGenerateApproach(options),
       );
