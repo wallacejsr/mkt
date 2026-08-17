@@ -372,6 +372,13 @@ function rawEmailAudienceWhere(businessId, filters, firstParameter = 1) {
   return { clause: conditions.join(' AND '), values };
 }
 
+function buildRawEmailHtml(textBody) {
+  const paragraphs = String(textBody || '').split(/\n{2,}/).filter(Boolean)
+    .map(paragraph => `<p style="margin:0 0 18px 0;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:24px;color:#1f2937">${escapeEmailHtml(paragraph).replace(/\n/g, '<br>')}</p>`)
+    .join('');
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center"><table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px"><tr><td style="padding:0;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:24px;color:#1f2937">${paragraphs}</td></tr></table></td></tr></table>`;
+}
+
 async function rawEmailAudiencePreview(executor, businessId, filters) {
   const audience = rawEmailAudienceWhere(businessId, filters);
   const row = (await executor.query(`
@@ -495,7 +502,7 @@ async function processRawEmailCampaignBatch(pool, campaignId, businessId, appUrl
   let failed = 0;
   await rawMapWithConcurrency(recipients, 3, async recipient => {
     const unsubscribeUrl = `${appUrl}/api/prospecting/email/unsubscribe/${recipient.unsubscribe_token}`;
-    const html = `${campaign.html_body}<div style="margin-top:28px;padding-top:16px;border-top:1px solid #e2e8f0;font:12px Arial,sans-serif;color:#64748b">Você recebeu este contato comercial por seu endereço profissional. <a href="${unsubscribeUrl}" style="color:#4f46e5">Não quero receber novos e-mails</a>.</div>`;
+    const html = `${campaign.html_body}<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center"><table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px"><tr><td style="padding:20px 0 0 0;border-top:1px solid #d1d5db;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;color:#6b7280">Você recebeu este contato comercial por seu endereço profissional. <a href="${unsubscribeUrl}" style="color:#475569;text-decoration:underline">Não quero receber novos e-mails</a>.</td></tr></table></td></tr></table>`;
     const text = `${campaign.text_body}\n\nPara não receber novos contatos comerciais, acesse: ${unsubscribeUrl}`;
     try {
       const result = await sendWithResend({
@@ -1954,7 +1961,7 @@ app.post('/api/prospecting/email/campaigns', async (req, res) => {
     const domain = (await pool.query('SELECT * FROM email_sender_domains WHERE business_id=$1 ORDER BY created_at DESC LIMIT 1', [authorized.business.id])).rows[0];
     if (!domain) return res.status(409).json({ error: 'Cadastre o domínio de envio antes de criar a campanha.' });
     const senderEmail = `${senderLocalPart}@${domain.domain}`;
-    const htmlBody = `<div style="font-family:Arial,sans-serif;max-width:640px;margin:auto;color:#1e293b">${textBody.split(/\n{2,}/).map(paragraph => `<p style="margin:0 0 16px;line-height:1.6">${escapeEmailHtml(paragraph).replace(/\n/g, '<br>')}</p>`).join('')}</div>`;
+    const htmlBody = buildRawEmailHtml(textBody);
 
     client = await pool.connect();
     await client.query('BEGIN');

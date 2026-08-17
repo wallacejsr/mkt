@@ -14,7 +14,7 @@ function normalizedAppUrl(value: string) {
 
 function appendUnsubscribe(html: string, text: string, url: string) {
   return {
-    html: `${html}<div style="margin-top:28px;padding-top:16px;border-top:1px solid #e2e8f0;font:12px Arial,sans-serif;color:#64748b">Você recebeu este contato comercial por seu endereço profissional. <a href="${url}" style="color:#4f46e5">Não quero receber novos e-mails</a>.</div>`,
+    html: `${html}<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center"><table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px"><tr><td style="padding:20px 0 0 0;border-top:1px solid #d1d5db;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;color:#6b7280">Você recebeu este contato comercial por seu endereço profissional. <a href="${url}" style="color:#475569;text-decoration:underline">Não quero receber novos e-mails</a>.</td></tr></table></td></tr></table>`,
     text: `${text}\n\nPara não receber novos contatos comerciais, acesse: ${url}`,
   };
 }

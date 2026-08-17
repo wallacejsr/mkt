@@ -146,10 +146,14 @@ const getEmailAudiencePreview = async (executor: any, businessId: string, filter
   };
 };
 
-const buildEmailHtml = (textBody: string) => textBody
-  .split(/\n{2,}/)
-  .map(paragraph => `<p style="margin:0 0 16px;line-height:1.6">${escapeHtml(paragraph).replace(/\n/g, '<br>')}</p>`)
-  .join('');
+const buildEmailHtml = (textBody: string) => {
+  const paragraphs = textBody
+    .split(/\n{2,}/)
+    .filter(Boolean)
+    .map(paragraph => `<p style="margin:0 0 18px 0;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:24px;color:#1f2937">${escapeHtml(paragraph).replace(/\n/g, '<br>')}</p>`)
+    .join('');
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center"><table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px"><tr><td style="padding:0;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:24px;color:#1f2937">${paragraphs}</td></tr></table></td></tr></table>`;
+};
 
 prospectingRouter.get('/email/provider-status', requireAuth, ensureBusinessOwnership, async (_req: any, res) => {
   res.json(getEmailProviderStatus());
@@ -401,7 +405,7 @@ prospectingRouter.post('/email/campaigns', requireAuth, ensureBusinessOwnership,
         status: 'draft',
         subject,
         previewText: previewText || null,
-        htmlBody: `<div style="font-family:Arial,sans-serif;max-width:640px;margin:auto;color:#1e293b">${buildEmailHtml(textBody)}</div>`,
+        htmlBody: buildEmailHtml(textBody),
         textBody,
         senderName,
         senderEmail,
